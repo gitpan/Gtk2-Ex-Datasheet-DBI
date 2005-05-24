@@ -1,0 +1,35 @@
+CHANGELOG
+
+Version 0.3, released 24-May-2005
+    
+    Worked around 'Use of uninitialized value' warnings
+    Added support for CellRendererCombo - thanks muppet :)
+    Fixed bug where only the 1st updated row was applied
+    Added support for CellRendererToggle
+    Added dynamic column sizing, with mix of percentage and absolute values
+    Added 'multi_select' property which sets 'multiple' selection mode ( only really affects deleting )
+    
+Version 0.2, released 19-May-2005
+    
+    Ported to Gtk2::ListStore / Gtk2::TreeView
+        ( only supports text cell renderers currently )
+    Renamed sql_fields to sql_select and changes requirement back to and SQL select statement
+    Don't use the '!' special character for inserts - instead use record status indicator ( column 0 )
+    All SQL operations occur in the 'apply' method as a batch
+    Added constants for status indicators
+    Added pixbuf column to display record status
+    Added field validation plugin functionality
+    Added intelligent detection of record status - don't consider non-changing 'row-changed' events a 'change'
+    Added ReadOnly flag: prevents edits, inserts and deletes if set
+    Put some actual data into the sql dump in the example application
+    Cleaned up error dialogs and added more of them
+    Removed all ComboBox stuff from example app for now
+    
+Version 0.1, released 16-May-2005
+
+    First Version :)
+    Querying database and dumping records into a Gtk2::Ex::Simple::List
+    Detecting changes
+    Updating affected records in the data as a batch
+    Inserting records
+    Deleting records

@@ -1,0 +1,16 @@
+This is a simple test application to show you how to use Gtk2::Ex::Datasheet::DBI
+
+You will have to start out by creating a database and populating it with the tables that is used.
+The 'datasheet.sql' file is a mysqldump of this table. Create your database:
+
+    mysql> create database datasheet;
+
+Then import the data:
+
+    mysql datasheet < /path/to/datasheet.sql -p
+
+Then edit the test_datasheet.pl script and enter your username / password  ( and maybe dbserver ) in the LoadForm() sub.
+
+You should then be able to run the example.
+
+If you have an old database from a previous example, delete it and re-create it.
