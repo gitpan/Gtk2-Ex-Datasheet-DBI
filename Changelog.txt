@@ -1,5 +1,17 @@
 CHANGELOG
 
+Version 0.4, released 27-May-2005
+    
+    Changed calculation of primary key column to use $self->fieldlist
+    Added renderer type 'none' for hidden fields
+    Insert method accepts a list of column / value pairs to set initial values
+    Added column_from_name function to convert a column name into it's number in the model
+    Added column_value to look up a value in the selected row
+    Added question dialog to ask whether to apply current datasheet before querying ( override with 'dont_apply' )
+    Cache the fieldlist array in $self->{fieldlist} so we don't have to query the DB every time we need a field list
+    Remove requirement of field definitions - will use fieldnames from the database if none are given ( CellRendererText for everything )
+    Added POD documentation
+    
 Version 0.3, released 24-May-2005
     
     Worked around 'Use of uninitialized value' warnings

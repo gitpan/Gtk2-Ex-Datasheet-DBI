@@ -30,7 +30,7 @@ use constant{
 };
 
 BEGIN {
-	$Gtk2::Ex::DBI::Datasheet::VERSION = '0.3';
+	$Gtk2::Ex::DBI::Datasheet::VERSION = '0.4';
 }
 
 sub new {
@@ -52,10 +52,11 @@ sub new {
 	
 	bless $self, $class;
 	
-	# Remember the primary key column
-	$self->{primary_key_column} = scalar(@{$self->{fields}}) + 1;
-	
 	$self->setup_treeview;
+	
+	# Remember the primary key column
+	$self->{primary_key_column} = scalar(@{$self->{fieldlist}}) + 1;
+	
 	$self->query;
 	
 	return $self;
@@ -68,6 +69,18 @@ sub setup_treeview {
 	# a new TreeStore whenever we requery )
 	
 	my $self = shift;
+	
+	# Populate our fieldlist array so we don't have to continually query the DB server for it
+	my $sth = $self->{dbh}->prepare($self->{sql_select} . " from " . $self->{table} . " where 0=1");
+	$sth->execute;
+	$self->{fieldlist} = $sth->{'NAME'};
+	
+	# If there are no field definitions, then use these fields from the database
+	if ( ! $self->{fields} ) {
+		for my $field ( @{$self->{fieldlist}} ) {
+			push @{$self->{fields}}, { name	=> $field };
+		}
+	}
 	
 	my $column_no = 0;
 	
@@ -87,9 +100,9 @@ sub setup_treeview {
 	push @{$self->{ts_def}}, "Glib::Int";
 	
 	$column_no ++;
-	
-	# Next are the fields in $self->{fields}
-	for my $field (@{$self->{fields}}) {
+		
+	# Now set up the model and columns
+	for my $field ( @{$self->{fields}} ) {
 		
 		if ( !$field->{renderer} || $field->{renderer} eq "text" ) {
 			
@@ -108,6 +121,7 @@ sub setup_treeview {
 												);
 			
 			$renderer->signal_connect( edited => sub { $self->process_text_editing( @_ ); } );
+			
 			$self->{treeview}->append_column($self->{columns}[$column_no]);
 			
 			# Add a string column to the TreeStore definition ( recreated when we query() )
@@ -135,6 +149,7 @@ sub setup_treeview {
 												);
 			
 			$renderer->signal_connect( edited => sub { $self->process_text_editing( @_ ); } );
+			
 			$self->{treeview}->append_column($self->{columns}[$column_no]);
 			
 			$self->{columns}[$column_no]->set_cell_data_func($renderer, sub { $self->render_combo_cell( @_ ); } );
@@ -159,11 +174,17 @@ sub setup_treeview {
 												);
 			
 			$renderer->signal_connect( toggled => sub { $self->process_toggle( @_ ); } );
+			
 			$self->{treeview}->append_column($self->{columns}[$column_no]);
 			
 			# Add an integer column to the TreeStore definition ( recreated when we query() )
 			push @{$self->{ts_def}}, "Glib::Boolean";
-						
+			
+		} elsif ( $field->{renderer} eq "none" ) {
+			
+			print "Adding hidden field " . $field->{name} . "\n";
+			push @{$self->{ts_def}}, "Glib::String";
+			
 		} else {
 			
 			warn "Unknown render: " . $field->{renderer} . "\n";
@@ -241,6 +262,8 @@ sub render_combo_cell {
 	if ( !$found_match ) {
 		$renderer->set( text	=> "" );
 	}
+	
+	return FALSE;
 	
 }
 
@@ -324,6 +347,8 @@ sub process_text_editing {
 	#	
 	#}
 	
+	return FALSE;
+	
 }
 
 sub process_toggle {
@@ -336,11 +361,48 @@ sub process_toggle {
 	  my $old_value = $model->get( $iter, $renderer->{column} );
 	  $model->set ( $iter, $renderer->{column}, ! $old_value );
 	  
+	  return FALSE;
+	  
 }
 
 sub query {
 	
-	my ( $self, $sql_where ) = @_;
+	my ( $self, $sql_where, $dont_apply ) = @_;
+	
+	my $model = $self->{treeview}->get_model;
+	
+	if ( ! $dont_apply && $model ) {
+		
+		# First test to see if we have any outstanding changes to the current datasheet
+		
+		my $iter = $model->get_iter_first;
+		
+		while ($iter) {
+			
+			my $status = $model->get($iter, STATUS_COLUMN);
+			
+			# Decide what to do based on status
+			if ( $status != UNCHANGED ) {
+				
+				my $answer = ask Gtk2::Ex::Dialogs::Question(
+						    title	=> "Apply changes to " . $self->{table} . " before querying?",
+						    text	=> "There are outstanding changes to the current datasheet ( " . $self->{table} . " )."
+									. " Do you want to apply them before running a new query?"
+									    );
+				
+				if ($answer) {
+				    if ( ! $self->apply ) {
+					return FALSE; # Apply method will already give a dialog explaining error
+				    }
+				}
+				
+			}
+			
+			$iter = $model->iter_next($iter);
+			
+		}
+		
+	}
 	
 	if (defined $sql_where) {
 		$self->{sql_where} = $sql_where;
@@ -472,14 +534,13 @@ sub apply {
 			
 			# We process the insert / update operations in a similar fashion
 			
-			my $inserting = 0;		# Insertion flag
 			my $sql;			# Final SQL to send to DB server
 			my $sql_fields;			# A comma-separated list of fields
 			my @values;			# An array of values taken from the current record
 			my $placeholders;		# A string of placeholders, eg ( ?, ?, ? )
 			my $field_index = 1;		# Start at offset=1 to skip over changed flag
 			
-			foreach my $field ( @{$self->fieldlist} ) {
+			foreach my $field ( @{$self->{fieldlist}} ) {
 				if ( $status == INSERTED ) {
 					$sql_fields .= " $field,";
 					$placeholders .= " ?,";
@@ -546,13 +607,13 @@ sub apply {
 		
 	}
 	
-	return 1;
+	return TRUE;
 	
 }
 
 sub insert {
 	
-	my $self = shift;
+	my ( $self, @columns_and_values ) = @_;
 	
 	if ( $self->{readonly} ) {
 		new_and_run Gtk2::Ex::Dialogs::ErrorMsg(
@@ -564,7 +625,17 @@ sub insert {
 		
 	my $model = $self->{treeview}->get_model;
 	my $iter = $model->append;
-	$model->set( $iter, STATUS_COLUMN, INSERTED );
+	
+	my @new_record;
+	
+	push @new_record, $iter, STATUS_COLUMN, INSERTED;
+	
+	if (scalar(@columns_and_values)) {
+		push @new_record, @columns_and_values;
+	}
+	
+	$model->set( @new_record );
+	
 	$self->{treeview}->set_cursor( $model->get_path($iter), $self->{columns}[1], 1 );
 	
 	return 1;
@@ -627,17 +698,45 @@ sub size_allocate {
 	
 }
 
-sub fieldlist {
+sub column_from_name {
 	
-	# This function returns a fieldlist by querying the DB server ( with the impossible condition 'where 0=1' for speed )
-	# This is the only reliable way of building a fieldlist, eg when the query returned no records, or where we are inserting
-	# a record, and the only field in the in-memory recordset is the primary key ( also with the possibility of an empty recordset )
+	# This function takes a field name and returns the column that the field is in by
+	# walking through the array $self->{fieldlist}
 	
-	my $self = shift;
+	my ( $self, $sql_fieldname ) = @_;
 	
-	my $sth = $self->{dbh}->prepare($self->{sql_select} . " from " . $self->{table} . " where 0=1");
-	$sth->execute;
-	return $sth->{'NAME'};
+	my $counter = 1; # Start at 1 because column is status column
+	
+	for my $field (@{$self->{fieldlist}}) {
+		if ($field eq $sql_fieldname) {
+			return $counter;
+		}
+		$counter ++;
+	}
+	
+}
+
+sub column_value {
+	
+	# This function returns the value in the requested column in the currently selected row
+	# If multi_select is turned on and more than 1 row is selected, it looks in the 1st row
+	
+	my ( $self, $sql_fieldname ) = @_;
+	
+	if ($self->{mult_select}) {
+		print "Gtk2::Ex::Datasheet::DBI - column_value() called with multi_select enabled!\n"
+			. " ... returning value from 1st selected row\n";
+	}
+	
+	my @selected_paths = $self->{treeview}->get_selection->get_selected_rows;
+	
+	if ( ! scalar(@selected_paths) ) {
+		return 0;
+	}
+		
+	my $model = $self->{treeview}->get_model;
+	
+	return $model->get( $model->get_iter($selected_paths[0]), $self->column_from_name($sql_fieldname) );
 	
 }
 
@@ -657,3 +756,213 @@ sub last_insert_id {
 }
 
 1;
+
+=head1 NAME
+
+Gtk2::Ex::Datasheet::DBI
+
+=head1 SYNOPSIS
+
+use DBI;
+use Gtk2 -init;
+use Gtk2::Ex::Datasheet::DBI; 
+
+my $dbh = DBI->connect (
+                        "dbi:mysql:dbname=sales;host=screamer;port=3306",
+                        "some_username",
+                        "salespass", {
+                                       PrintError => 0,
+                                       RaiseError => 0,
+                                       AutoCommit => 1,
+                                     }
+);
+
+my $datasheet_def = {
+                      dbh          => $dbh,
+                      table        => "BirdsOfAFeather",
+                      primary_key  => "ID",
+                      sql_select   => "select FirstName, LastName, GroupNo, Active",
+                      sql_order_by => "order by LastName",
+                      treeview     => $testwindow->get_widget("BirdsOfAFeather_TreeView"),
+                      fields       => [
+                                         {
+                                            name          => "First Name",
+                                            x_percent     => 35,
+                                            validation    => sub { &validate_first_name(@_); }
+                                         },
+                                         {
+                                            name          => "Last Name",
+                                            x_percent     => 35
+                                         },
+                                         {
+                                            name          => "Group",
+                                            x_percent     => 30,
+                                            renderer      => "combo",
+                                            model         => $group_model
+                                         },
+                                         {
+                                            name          => "Active",
+                                            x_absolute    => 50,
+                                            renderer      => "toggle"
+                                         }
+                                      ],
+                      multi_select => TRUE
+};
+
+$birds_of_a_feather_datasheet = Gtk2::Ex::Datasheet::DBI->new($datasheet_def)
+   || die ("Error setting up Gtk2::Ex::Datasheet::DBI\n");
+
+=head1 DESCRIPTION
+
+This module automates the process of setting up a model and treeview based on field definitions you pass it,
+querying the database, populating the model, and updating the database with changes made by the user.
+
+Steps for use:
+
+* Open a DBI connection
+
+* Create a 'bare' Gtk2::TreeView - I use Gtk2::GladeXML, but I assume you can do it the old-fashioned way
+
+* Create a Gtk2::Ex::Datasheet::DBI object and pass it your TreeView object
+
+You would then typically create some buttons and connect them to the methods below to handle common actions
+such as inserting, deleting, etc.
+
+=head1 METHODS
+
+=head2 new
+
+Object constructor. Expects a hash of key / value pairs. Bare minimum are:
+  
+  dbh             - a DBI database handle
+  table           - the name of the table you are querying
+  primary_key     - the primary key of the table you are querying ( required for updating / deleting )
+  sql_select      - the 'select' clause of the query
+  
+Other keys accepted are:
+  
+  sql_where       - the 'where' clause of the query
+  sql_order_by    - the 'order by' clause of the query
+  multi_selcet    - a boolean to turn on the TreeView's 'multiple' selection mode
+  fields          - an array of hashes to describe the fields ( columns ) in the TreeView
+  
+Each item in the 'fields' key is a hash, with the following keys:
+  
+  name            - the name to display in the column's heading
+  x_percent       - a percentage of the available width to use for this column
+  x_absolute      - an absolute value to use for the width of this column
+  renderer        - string name of renderer - possible values are currently:
+                        - text    - default if no renderer defined )
+                        - combo   - requires a model to be defined as well )
+                        - toggle  - good for boolean values )
+                        - none    - use this for hidden columns
+  model           - a TreeModel to use with a combo renderer
+  validation      - a sub to run after data entry and before the value is accepted to validate data
+
+=head2 query ( [ new_where_clause ], [ dont_apply ] )
+
+Requeries the DB server. If there are any outstanding changes that haven't been applied to the database,
+a dialog will be presented to the user asking if they want to apply updates before requerying.
+
+If a new where clause is passed, it will replace the existing one.
+If dont_apply is set, *no* dialog will appear if there are outstanding changes to the data.
+
+The query method doubles as an 'undo' method if you set the dont_apply flag, eg:
+
+$datasheet->query ( undef, TRUE );
+
+This will requery and reset all the status indicators.
+
+=head2 apply
+
+Applies all changes ( inserts, deletes, alterations ) in the datasheet to the database.
+As changes are applied, the record status indicator will be changed back to the original 'synchronised' icon.
+
+If any errors are encountered, a dialog will be presented with details of the error, and the apply method
+will return FALSE without continuing through the records. The user will be able to tell where the apply failed
+by looking at the record status indicators ( and considering the error message they were presented ).
+
+=head2 insert ( [ @columns_and_values ] )
+
+Inserts a new row in the *model*. The record status indicator will display an 'insert' icon until the record
+is applied to the database ( apply method ).
+
+You can optionally set default values by passing them as an array of column numbers and values, eg:
+   $datasheet->insert(
+                       2   => "Default value for column 2",
+                       5   => "Another default - for column 5"
+                     );
+
+Note that you can use the column_from_name method for fetching column numbers from field names ( see below ).
+
+=head2 delete
+
+Marks all selected records for deletion, and sets the record status indicator to a 'delete' icon.
+The records will remain in the database until the apply method is called.
+
+=head2 column_from_name ( sql_fieldname )
+
+Returns a field's column number in the model. Note that you *must* use the SQL fieldname,
+and not the column heading's name in the treeview.
+
+=head2 column_value ( sql_fieldname )
+
+Returns the value of the requested column in the currently selected row.
+If multi_select is on and more than 1 row is selected, only the 1st value is returned.
+You *must* use the SQL fieldname, and not the column heading's name in the treeview.
+
+
+=head1 General Ranting
+
+=head2 Automatic Column Widths
+
+You can use x_percent and x_absolute values to set up automatic column widths. Absolute values are set
+once - at the start. In this process, all absolute values ( including the record status column ) are
+added up and the total stored in $self->{sum_absolute_x}.
+
+Each time the TreeView is resized ( size_allocate signal ), the size_allocate method is called which resizes
+all columns that have an x_percent value set. The percentages should of course all add up to 100%, and the width
+of each column is their share of available width:
+ ( total width of treeview ) - $self->{sum_absolute_x} * x_percent
+
+IMPORTANT NOTE:
+The size_allocate method interferes with the ability to resize *down*. I've found a simple way around this.
+When you create the TreeView, put it in a ScrolledWindow, and set the H_Policy to 'automatic'. I assume this allows
+you to resize the treeview down to smaller than the total width of columns ( which automatically creates the
+scrollbar in the scrolled window ). Immediately after the resize, when our size_allocate method recalculates the
+size of each column, the scrollbar will no longer be needed and will disappear. Not perfect, but it works. It also
+doesn't produce *too* much flicker on my system, but resize operations are noticably slower. What can I say?
+Patches appreciated :)
+
+=head2 CellRendererCombo
+
+If you have Gtk-2.6 or greater, you can use the new CellRendererCombo. Set the renderer to 'combo' and attach
+your model to the field definition. You currently *must* have a model with ( numeric ) ID / String pairs, which is the
+usual for database applications, so you shouldn't have any problems. See the example application for ... an example.
+
+=head1 Authors
+
+Daniel Kasak - dan@entropy.homelinux.org
+
+=head1 Bugs
+
+I think you must be mistaken
+
+=head1 Other cool things you should know about
+
+This module is part of a 3-some:
+
+Gtk2::Ex::DBI                 - forms
+
+Gtk2::Ex::Datasheet::DBI      - datasheets
+
+PDF::ReportWriter             - reports
+
+Together ( and with a little help from other modules such as Gtk2::GladeXML ),
+these modules give you everything you need for rapid application development of database front-ends
+on Linux, Windows, or ( with a little frigging around ) Mac OS-X.
+
+All the above modules are available via cpan, or from:
+http://entropy.homelinux.org
+
+=head1 Crank ON!

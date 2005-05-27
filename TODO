@@ -9,11 +9,6 @@ Things, to do, in order of priority:
     This is proving to be more difficult than I'd hoped
     
 - Add support for a custom CellRendererSpinButton for numeric values
-
-- Remove requirement of defining each field ( partially done )
-    eg You could just set up a query: 'select * from table' and not define any fields
-    This would make a good database explorer - you could create a browser for all the tables in a database
-    and select to open one in datasheet mode ... I suppose this is already possible, but with the extra work
-    of setting up the field names based on the table
+    How do I do this? Maybe we should let people pass their own renderers?
 
 - Figure out what's up with blocking the size_allocate signal

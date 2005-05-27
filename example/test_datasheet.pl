@@ -74,7 +74,8 @@ sub LoadForm {
 
 sub on_btn_Add_clicked {
 	
-	$birds_of_a_feather_datasheet->insert;
+	# As we insert a new record, default to being a member of the US government ( Group 1 = US Governmant )
+	$birds_of_a_feather_datasheet->insert( $birds_of_a_feather_datasheet->column_from_name("GroupNo") => 1 );
 	
 }
 
@@ -86,9 +87,10 @@ sub on_btn_Delete_clicked {
 
 sub on_btn_Undo_clicked {
 	
-	# I'm currently thinking about whether I should bother with some 'other' way of undoing changes,
-	# but for now this works:
-	$birds_of_a_feather_datasheet->query;
+	# To prevent a dialog asking whether we should apply changes,
+	# run query with an undef value for the where clause ( so we don't pick up a new where clause ),
+	# and a TRUE value for the 'dont_apply' flag
+	$birds_of_a_feather_datasheet->query( undef, TRUE );
 	
 }
 
