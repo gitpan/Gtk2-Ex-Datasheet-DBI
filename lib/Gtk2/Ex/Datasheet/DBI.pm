@@ -30,7 +30,7 @@ use constant{
 };
 
 BEGIN {
-	$Gtk2::Ex::DBI::Datasheet::VERSION = '0.4';
+	$Gtk2::Ex::DBI::Datasheet::VERSION = '0.5';
 }
 
 sub new {
@@ -326,12 +326,15 @@ sub process_text_editing {
 	}
 	
 	# Move the focus to the next cell
-	# Not quite as easy as I had anticipated...
-	# Works most of the time, but in some circumstances goes *crazy*
 	
 	#if ( $column_no == $self->{primary_key_column} - 1 ) {
 	#	
-	#	# We're at the last column. Go to the 1st column in the next row
+	#	# We're at the last column.
+	#	# *** TODO *** The code below sends things crazy if people click in the datasheet currently
+	#	# Maybe this should be replaced with a custom cell renderer? Seems like a lot of work
+	#	# for not much advantage ( though don't let me discourage people from donating some time
+	#	# to make it work )
+	#	
 	#	my $new_iter = $model->iter_next($iter);
 	#	
 	#	if ($new_iter) {

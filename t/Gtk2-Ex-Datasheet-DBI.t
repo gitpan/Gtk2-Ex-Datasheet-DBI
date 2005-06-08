@@ -8,13 +8,19 @@ BEGIN { use_ok( 'Gtk2::Ex::Datasheet::DBI' ); }
 
 my @methods = qw(
 			new
-			create_simplelist
-			fieldlist
+			setup_treeview
+			render_pixbuf_cell
+			render_combo_cell
+			process_text_editing
+			process_toggle
 			query
 			insert
+			size_allocate
 			apply
 			changed
 			delete
+			column_from_name
+			column_value
 			last_insert_id
 		);
 
