@@ -3,6 +3,8 @@
 # (C) Daniel Kasak: dan@entropy.homelinux.org
 # See COPYRIGHT file for full license
 
+# See 'man Gtk2::Ex::DBI' for full documentation ... or of course continue reading
+
 package Gtk2::Ex::Datasheet::DBI;
 
 use strict;
@@ -30,7 +32,7 @@ use constant{
 };
 
 BEGIN {
-	$Gtk2::Ex::DBI::Datasheet::VERSION = '0.5';
+	$Gtk2::Ex::DBI::Datasheet::VERSION = '0.6';
 }
 
 sub new {
@@ -70,7 +72,7 @@ sub setup_treeview {
 	
 	my $self = shift;
 	
-	# Populate our fieldlist array so we don't have to continually query the DB server for it
+	# Cache the fieldlist array so we don't have to continually query the DB server for it
 	my $sth = $self->{dbh}->prepare($self->{sql_select} . " from " . $self->{table} . " where 0=1");
 	$sth->execute;
 	$self->{fieldlist} = $sth->{'NAME'};
@@ -106,7 +108,8 @@ sub setup_treeview {
 		
 		if ( !$field->{renderer} || $field->{renderer} eq "text" ) {
 			
-			$renderer = Gtk2::CellRendererText->new;
+			#$renderer = Gtk2::CellRendererText->new;
+			$renderer = MOFO::CellRendererText->new;
 			
 			if ( ! $self->{readonly} ) {
 				$renderer->set( editable => 1 );
@@ -126,6 +129,36 @@ sub setup_treeview {
 			
 			# Add a string column to the TreeStore definition ( recreated when we query() )
 			push @{$self->{ts_def}}, "Glib::String";
+			
+		} elsif ( $field->{renderer} eq "number" ) {
+			
+			$renderer = MOFO::CellRendererSpinButton->new;
+			
+			if ( ! $self->{readonly} ) {
+				$renderer->set( mode => "editable" );
+			}
+			
+			$renderer->set(
+					min	=> $field->{min}	|| 0,
+					max	=> $field->{max}	|| 9999,
+					digits	=> $field->{digits}	|| 0,
+					step	=> $field->{step}	|| 1
+				      );
+			
+			$renderer->{column} = $column_no;
+			
+			$self->{columns}[$column_no] = Gtk2::TreeViewColumn->new_with_attributes(
+													$field->{name},
+													$renderer,
+													'value'	=> $column_no
+												);
+			
+			$renderer->signal_connect( edited => sub { $self->process_text_editing( @_ ); } );
+			
+			$self->{treeview}->append_column($self->{columns}[$column_no]);
+			
+			# Add a numeric field to the TreeStore definition ( recreated when we query() )
+			push @{$self->{ts_def}}, "Glib::Double";
 			
 		} elsif ( $field->{renderer} eq "combo" ) {
 			
@@ -317,38 +350,13 @@ sub process_text_editing {
 									}
 								     )
 			   ) {
-				return 0; # *** TODO *** rely on validation code to provide dialog on what's going on?
+				return FALSE; # Error dialog should have already been produced by validation code
 			}
 		}
 		
 		$model->set( $iter, $column_no, $new_text );
 		
 	}
-	
-	# Move the focus to the next cell
-	
-	#if ( $column_no == $self->{primary_key_column} - 1 ) {
-	#	
-	#	# We're at the last column.
-	#	# *** TODO *** The code below sends things crazy if people click in the datasheet currently
-	#	# Maybe this should be replaced with a custom cell renderer? Seems like a lot of work
-	#	# for not much advantage ( though don't let me discourage people from donating some time
-	#	# to make it work )
-	#	
-	#	my $new_iter = $model->iter_next($iter);
-	#	
-	#	if ($new_iter) {
-	#		my $new_path = $model->get_path($new_iter);
-	#		$self->{treeview}->set_cursor( $new_path, $self->{columns}[1], 1 );
-	#	} else {
-	#		$self->insert;
-	#	}
-	#	
-	#} else {
-	#	
-	#	$self->{treeview}->set_cursor( $path, $self->{columns}[$column_no + 1], 1 );
-	#	
-	#}
 	
 	return FALSE;
 	
@@ -760,6 +768,376 @@ sub last_insert_id {
 
 1;
 
+package MOFO::CellEditableText;
+
+# Copied and pasted from Odot
+
+use strict;
+use warnings;
+
+use Glib qw(TRUE FALSE);
+use Glib::Object::Subclass
+  Gtk2::TextView::,
+  interfaces => [ Gtk2::CellEditable:: ];
+
+sub set_text {
+	
+	my ($editable, $text) = @_;
+	$text = "" unless (defined($text));
+	
+	$editable -> get_buffer() -> set_text($text);
+	
+}
+
+sub get_text {
+	
+	my ($editable) = @_;
+	my $buffer = $editable -> get_buffer();
+	
+	return $buffer -> get_text($buffer -> get_bounds(), TRUE);
+	
+}
+
+sub select_all {
+	
+	my ($editable) = @_;
+	my $buffer = $editable -> get_buffer();
+	
+	my ($start, $end) = $buffer -> get_bounds();
+	$buffer -> move_mark_by_name(insert => $start);
+	$buffer -> move_mark_by_name(selection_bound => $end);
+	
+}
+
+1;
+
+package MOFO::CellRendererText;
+
+# Also copied and pasted from Odot, with bits and pieces from the CellRendererSpinButton example,
+# and even some of my own stuff worked in :)
+
+use strict;
+use warnings;
+
+use Gtk2::Gdk::Keysyms;
+use Glib qw(TRUE FALSE);
+use Glib::Object::Subclass
+  Gtk2::CellRendererText::,
+  properties => [
+    Glib::ParamSpec -> object("editable-widget",
+                              "Editable widget",
+                              "The editable that's used for cell editing.",
+                              MOFO::CellEditableText::,
+                              [qw(readable writable)])
+  ];
+
+sub INIT_INSTANCE {
+	
+	my ($cell) = @_;
+	
+	my $editable = MOFO::CellEditableText -> new();
+	
+	$editable -> set(border_width => $cell -> get("ypad"));
+	
+	$editable -> signal_connect(key_press_event => sub {
+		
+		my ($editable, $event) = @_;
+		
+		if ($event -> keyval == $Gtk2::Gdk::Keysyms{ Return } ||
+			$event -> keyval == $Gtk2::Gdk::Keysyms{ KP_Enter }
+			and not $event -> state & qw(control-mask)) {
+				
+				# Grab parent
+				my $parent = $editable->get_parent;
+				
+				$editable -> { _editing_canceled } = FALSE;
+				$editable -> editing_done();
+				$editable -> remove_widget();
+				
+				my ($path, $focus_column) = $parent->get_cursor;
+				my @cols = $parent->get_columns;
+				my $next_col = undef;
+				
+				foreach my $i (0..$#cols) {
+					if ($cols[$i] == $focus_column) {
+						if ($event->state >= 'shift-mask') {
+							# go backwards
+							$next_col = $cols[$i-1] if $i > 0;
+						} else {
+							# go forwards
+							$next_col = $cols[$i+1] if $i < $#cols;
+						}
+						last;
+					}
+				}
+				
+				$parent->set_cursor ($path, $next_col, 1)
+					if $next_col;
+				
+				return TRUE;
+				
+		}
+	
+		return FALSE;
+		
+	});
+	
+	$editable -> signal_connect(editing_done => sub {
+		
+		my ($editable) = @_;
+		
+		# gtk+ changed semantics in 2.6.  you now need to call stop_editing().
+		if (Gtk2 -> CHECK_VERSION(2, 6, 0)) {
+			$cell -> stop_editing($editable -> { _editing_canceled });
+		}
+		
+		# if gtk+ < 2.4.0, emit the signal regardless of whether editing was
+		# canceled to make undo/redo work.
+		
+		my $new = Gtk2 -> CHECK_VERSION(2, 4, 0);
+		
+		if (!$new || ($new && !$editable -> { _editing_canceled })) {
+			$cell -> signal_emit(edited => $editable -> { _path }, $editable -> get_text());
+		} else {
+			$cell -> editing_canceled();
+		}
+	});
+	
+	$cell -> set(editable_widget => $editable);
+	
+}
+
+sub START_EDITING {
+	
+	my ($cell, $event, $view, $path, $background_area, $cell_area, $flags) = @_;
+	
+	if ($event) {
+		return unless ($event -> button == 1);
+	}
+	
+	my $editable = $cell -> get("editable-widget");
+	
+	$editable -> { _editing_canceled } = FALSE;
+	$editable -> { _path } = $path;
+	
+	$editable -> set_text($cell -> get("text"));
+	$editable -> select_all();
+	$editable -> show();
+	
+	return $editable;
+	
+}
+
+package MOFO::CellRendererSpinButton;
+
+use POSIX qw(DBL_MAX UINT_MAX);
+
+use constant x_padding => 2;
+use constant y_padding => 3;
+
+use Glib::Object::Subclass
+  "Gtk2::CellRenderer",
+  signals => {
+		edited => {
+			    flags => [qw(run-last)],
+			    param_types => [qw(Glib::String Glib::Double)],
+			  },
+	     },
+  properties => [
+		  Glib::ParamSpec -> double("xalign", "Horizontal Alignment", "Where am i?", 0.0, 1.0, 1.0, [qw(readable writable)]),
+		  Glib::ParamSpec -> boolean("editable", "Editable", "Can I change that?", 0, [qw(readable writable)]),
+		  Glib::ParamSpec -> uint("digits", "Digits", "How picky are you?", 0, UINT_MAX, 2, [qw(readable writable)]),
+		  map {
+			  Glib::ParamSpec->double(
+						    $_ -> [0],
+						    $_ -> [1],
+						    $_ -> [2],
+						    0.0,
+						    DBL_MAX,
+						    $_ -> [3],
+						    [qw(readable writable)]
+						 )
+		  }
+		  (
+		    ["value", "Value", "How much is the fish?",      0.0],
+		    ["min",   "Min",   "No way, I have to live!",    0.0],
+		    ["max",   "Max",   "Ah, you're too generous.", 100.0],
+		    ["step",  "Step",  "Okay.",                      5.0])
+		  ];
+  
+sub INIT_INSTANCE {
+	
+	my $self = shift;
+	
+	$self->{editable} =     0;
+	$self->{digits}   =     2;
+	$self->{value}    =   0.0;
+	$self->{min}      =   0.0;
+	$self->{max}      = 100.0;
+	$self->{step}     =   5.0;
+	$self->{xalign}   =   1.0;
+	
+}
+
+sub calc_size {
+	
+	my ($cell, $layout, $area) = @_;
+	
+	my ($width, $height) = $layout -> get_pixel_size();
+	
+	return (
+		$area ? $cell->{xalign} * ($area->width - ($width + 3 * x_padding)) : 0,
+		0,
+		$width + x_padding * 2,
+		$height + y_padding * 2
+	       );
+	
+}
+
+sub format_text {
+	
+	my $cell = shift;
+	my $format = sprintf '%%.%df', $cell->{digits};
+	sprintf $format, $cell->{value};
+	
+}
+
+sub GET_SIZE {
+	
+	my ($cell, $widget, $area) = @_;
+	
+	my $layout = $cell -> get_layout($widget);
+	$layout -> set_text($cell -> format_text);
+	
+	return $cell -> calc_size($layout, $area);
+	
+}
+
+sub get_layout {
+	
+	my ($cell, $widget) = @_;
+	
+	return $widget -> create_pango_layout("");
+	
+}
+
+sub RENDER {
+	
+	my ($cell, $window, $widget, $background_area, $cell_area, $expose_area, $flags) = @_;
+	my $state;
+	
+	if ($flags & 'selected') {
+		$state = $widget -> has_focus()
+		? 'selected'
+		: 'active';
+	} else {
+		$state = $widget -> state() eq 'insensitive'
+		? 'insensitive'
+		: 'normal';
+	}
+	
+	my $layout = $cell -> get_layout($widget);
+	$layout -> set_text ($cell -> format_text);
+	
+	my ($x_offset, $y_offset, $width, $height) = $cell -> calc_size($layout, $cell_area);
+	
+	$widget -> get_style -> paint_layout(
+						$window,
+						$state,
+						1,
+						$cell_area,
+						$widget,
+						"cellrenderertext",
+						$cell_area -> x() + $x_offset + x_padding,
+						$cell_area -> y() + $y_offset + y_padding,
+						$layout
+					    );
+	
+}
+
+sub START_EDITING {
+	
+	my ($cell, $event, $view, $path, $background_area, $cell_area, $flags) = @_;
+	my $spin_button = Gtk2::SpinButton -> new_with_range($cell -> get(qw(min max step)));
+	
+	$spin_button -> set_value($cell -> get("value"));
+	$spin_button -> set_digits($cell -> get("digits"));
+	
+	$spin_button -> grab_focus();
+	
+	$spin_button -> signal_connect(key_press_event => sub {
+		
+		my (undef, $event) = @_;
+		
+		# grab this for later.
+		my $parent = $spin_button->get_parent;
+		
+		if ($event -> keyval == $Gtk2::Gdk::Keysyms{ Return } ||
+			$event -> keyval == $Gtk2::Gdk::Keysyms{ KP_Enter } ||
+			$event -> keyval == $Gtk2::Gdk::Keysyms{ Tab }) {
+			
+				$spin_button -> update();
+				$cell -> signal_emit(edited => $path, $spin_button -> get_value());
+				$spin_button -> destroy();
+				
+				if ( ( $event -> keyval == $Gtk2::Gdk::Keysyms{ Return } ||
+					$event->keyval == $Gtk2::Gdk::Keysyms{ KP_Enter } )
+					&& $parent -> isa ('Gtk2::TreeView')) {
+					
+					# If the user has hit Enter, move to the next column
+					my ($path, $focus_column) = $parent->get_cursor;
+					my @cols = $parent->get_columns;
+					my $next_col = undef;
+					
+					foreach my $i (0..$#cols) {
+						if ($cols[$i] == $focus_column) {
+							if ($event->state >= 'shift-mask') {
+								# go backwards
+								$next_col = $cols[$i-1] if $i > 0;
+							} else {
+								# go forwards
+								$next_col = $cols[$i+1] if $i < $#cols;
+							}
+							last;
+						}
+					}
+					
+					$parent->set_cursor ($path, $next_col, 1)
+						if $next_col;
+				}
+				
+				return 1;
+				
+			} elsif ($event -> keyval == $Gtk2::Gdk::Keysyms{ Up }) {
+				$spin_button -> spin('step-forward', ($spin_button -> get_increments())[0]);
+				return 1;
+			} elsif ($event -> keyval == $Gtk2::Gdk::Keysyms{ Down }) {
+				$spin_button -> spin('step-backward', ($spin_button -> get_increments())[0]);
+				return 1;
+			}
+			
+			return 0;
+			
+		}
+				      );
+	
+	$spin_button -> signal_connect(focus_out_event => sub {
+		
+		$spin_button -> update();
+		$cell -> signal_emit(edited => $path, $spin_button -> get_value());
+		
+	}
+				      );
+	
+	$spin_button -> show_all();
+	
+	return $spin_button;
+	
+}
+
+1;
+
+
 =head1 NAME
 
 Gtk2::Ex::Datasheet::DBI
@@ -856,11 +1234,19 @@ Each item in the 'fields' key is a hash, with the following keys:
   x_absolute      - an absolute value to use for the width of this column
   renderer        - string name of renderer - possible values are currently:
                         - text    - default if no renderer defined )
+			- number  - invokes a customer CellRendererSpin button - see below
                         - combo   - requires a model to be defined as well )
                         - toggle  - good for boolean values )
                         - none    - use this for hidden columns
   model           - a TreeModel to use with a combo renderer
   validation      - a sub to run after data entry and before the value is accepted to validate data
+
+In the case of a 'number' renderer, the following keys are also used:
+
+  min             - the minimum value of the spinbutton
+  max             - the maximum value of the spinbutton
+  digits          - the number of decimal places in the spinbutton
+  step            - the value that the spinbutton's buttons spin the value by :)
 
 =head2 query ( [ new_where_clause ], [ dont_apply ] )
 

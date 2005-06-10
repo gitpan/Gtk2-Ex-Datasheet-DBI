@@ -1,5 +1,11 @@
 CHANGELOG
 
+Version 0.6, released 10-Jun-2005
+    
+    Switched standard CellRendererText with a custom renderer that has better focus policy after editing
+    Added custom CellRendererSpinButton ( with improved focus policy ) for numeric values
+    Fixed segfault on exit of example app
+    
 Version 0.5, released 08-Jun-2005
     
     Fixed make test so module actually installs via cpan

@@ -1,14 +1,3 @@
 Things, to do, in order of priority:
 
-- Editing behaviour that doesn't suck
-    Gtk2's default behaviour for editing cells in a TreeView is jaw-droppingly bad
-    Need to add sensible behaviour on receiving the following keys:
-        - TAB
-        - ENTER
-        - CURSOR
-    This is proving to be more difficult than I'd hoped
-    
-- Add support for a custom CellRendererSpinButton for numeric values
-    How do I do this? Maybe we should let people pass their own renderers?
-
 - Figure out what's up with blocking the size_allocate signal

@@ -120,7 +120,7 @@ sub on_TestWindow_destroy {
 	
 	$birds_of_a_feather_datasheet = undef;
 	$dbh->disconnect;
-	exit;
+	Gtk2->main_quit();
 	
 }
 
