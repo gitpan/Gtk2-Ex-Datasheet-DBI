@@ -1,5 +1,14 @@
 CHANGELOG
 
+Version 0.7, released 02-Aug-2005
+    
+    Added support for dynamic combos - ie combos whose options depend on the current row
+    Disabled MOFO::CellRendererSpinButton ... not exactly working properly yet
+    Add support for CellRendererCombos with a string ID ( previously only supported int IDs )
+    Added undo() method - convenience function that basically does $self->query( undef, TRUE );
+    Added MOFO::CellRendererDate - copied and pasted from Torsten Schoenfeld's example in the Gtk2 distribution
+    Separated demo app from main package
+    
 Version 0.6, released 10-Jun-2005
     
     Switched standard CellRendererText with a custom renderer that has better focus policy after editing
