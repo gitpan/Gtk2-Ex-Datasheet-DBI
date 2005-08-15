@@ -1,5 +1,15 @@
 CHANGELOG
 
+Version 0.8, released 15-Aug-2005
+    
+    Refresh dynamic combos when a toggle that they depend on is edited
+    Automatically choose a renderer type based on the database field type of each field ( can be overriden )
+    Automatically choose a default value for each column based on the database field definition ( can be overriden )
+    Removed more Perl warnings re: uninitialised use of ...
+    Choose string / numeric comparison based on database field type for combo renderers
+    Rename 'none' renderer to 'hidden' ( and still support old 'none' renderers )
+    Use text renderer for hidden columns ... so we can point dynamic combos at them and catch changes
+    
 Version 0.7, released 02-Aug-2005
     
     Added support for dynamic combos - ie combos whose options depend on the current row

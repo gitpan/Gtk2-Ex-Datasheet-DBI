@@ -14,16 +14,16 @@ use Glib qw/TRUE FALSE/;
 
 use Gtk2::Ex::Dialogs (
 			destroy_with_parent	=> TRUE,
-			modal			=> TRUE,
+			modal				=> TRUE,
 			no_separator		=> FALSE
 		      );
 
 # Record Status Indicators
 use constant {
-			UNCHANGED		=> 0,
-			CHANGED			=> 1,
-			INSERTED		=> 2,
-			DELETED			=> 3
+			UNCHANGED			=> 0,
+			CHANGED				=> 1,
+			INSERTED			=> 2,
+			DELETED				=> 3
 };
 
 # Record Status column
@@ -32,7 +32,7 @@ use constant{
 };
 
 BEGIN {
-			$Gtk2::Ex::DBI::Datasheet::VERSION = '0.7';
+			$Gtk2::Ex::DBI::Datasheet::VERSION = '0.8';
 }
 
 sub new {
@@ -41,16 +41,16 @@ sub new {
 	
 	# Assemble object from request
 	my $self = {
-			dbh			=> $$req{dbh},		# A database handle
-			table			=> $$req{table},	# The source table
+			dbh				=> $$req{dbh},			# A database handle
+			table			=> $$req{table},		# The source table
 			primary_key		=> $$req{primary_key},	# The primary key ( needed for inserts / updates )
 			sql_select		=> $$req{sql_select},	# The fields in the 'select' clause of the query
 			sql_where		=> $$req{sql_where},	# The 'where' clause of the query
-			sql_order_by		=> $$req{sql_order_by},	# The 'order by' clause of the query
-			treeview		=> $$req{treeview},	# The Gtk2::Treeview to connect to
-			fields			=> $$req{fields},	# Field definitions
-			multi_select		=> $$req{multi_select},	# Boolean to enable multi selection mode
-			on_apply		=> $$req{on_apply}	# Code that runs *after* each *record* is applied
+			sql_order_by	=> $$req{sql_order_by},	# The 'order by' clause of the query
+			treeview		=> $$req{treeview},		# The Gtk2::Treeview to connect to
+			fields			=> $$req{fields},		# Field definitions
+			multi_select	=> $$req{multi_select},	# Boolean to enable multi selection mode
+			on_apply		=> $$req{on_apply}		# Code that runs *after* each *record* is applied
 	};
 	
 	bless $self, $class;
@@ -58,7 +58,7 @@ sub new {
 	$self->setup_treeview;
 	
 	# Remember the primary key column
-	$self->{primary_key_column} = scalar(@{$self->{fieldlist}}) + 1 + ( $self->{dynamic_models} || 0 );
+	$self->{primary_key_column} = scalar( @{$self->{fieldlist}} ) + 1 + ( $self->{dynamic_models} || 0 );
 	
 	$self->query;
 	
@@ -77,13 +77,13 @@ sub setup_treeview {
 	my $sth;
 	
 	eval {
-		$sth = $self->{dbh}->prepare($self->{sql_select} . " from " . $self->{table} . " where 0=1")
+		$sth = $self->{dbh}->prepare( $self->{sql_select} . " from " . $self->{table} . " where 0=1" )
 			|| die $self->{dbh}->errstr;
 	};
 	
 	if ($@) {
 		Gtk2::Ex::Dialogs::ErrorMsg->new_and_run(
-								title		=> "Error in Query",
+								title		=> "Error in Query!",
 								text		=> "Database server says:\n$@"
 							);
 		return FALSE;
@@ -95,7 +95,7 @@ sub setup_treeview {
 	
 	if ($@) {
 		Gtk2::Ex::Dialogs::ErrorMsg->new_and_run(
-								title		=> "Error in Query",
+								title		=> "Error in Query!",
 								text		=> "Database server says:\n$@"
 							);
 		return FALSE;
@@ -103,10 +103,45 @@ sub setup_treeview {
 	
 	$self->{fieldlist} = $sth->{'NAME'};
 	
-	# If there are no field definitions, then use these fields from the database
+	$sth->finish;
+	
+	# Fetch column_info for current table
+	$sth = $self->{dbh}->column_info ( undef, $self->{schema}, $self->{table}, '%' );
+	
+	# Loop through the list of columns from the database, and
+	# add only columns that we're actually dealing with
+	while ( my $column_info_row = $sth->fetchrow_hashref ) {
+		for my $field ( @{$self->{fieldlist}} ) {
+			if ( $column_info_row->{COLUMN_NAME} eq $field ) {
+				$self->{column_info}->{$field} = $column_info_row;
+				last;
+			}
+		}
+	}
+	
+	$sth->finish;
+	
+	# If there are no field definitions, then create some from our fieldlist from the database
 	if ( ! $self->{fields} ) {
 		for my $field ( @{$self->{fieldlist}} ) {
 			push @{$self->{fields}}, { name	=> $field };
+		}
+	}
+	
+	# Now loop through our field definitions, and fill in the renderers if they're not already done
+	for my $field ( @{$self->{fields}} ) {
+		if ( ! $field->{renderer} ) {
+			my $sql_name = $self->column_name_to_sql_name( $field->{name} );
+			my $fieldtype = $self->{column_info}->{$sql_name}->{TYPE_NAME};
+			if ( $fieldtype =~ m/INT/ ) {
+				$field->{renderer} = "number";
+			} elsif ( $fieldtype =~ m/CHAR/ ) {
+				$field->{renderer} = "text";
+			} elsif ( $fieldtype eq "TIMESTAMP" || $fieldtype eq "DATE" ) {
+				$field->{renderer} = "date";
+			} else {
+				$field->{renderer} = "text";
+			}
 		}
 	}
 	
@@ -122,22 +157,31 @@ sub setup_treeview {
 	$self->{columns}[$column_no]->set_fixed_width(20);
 	$self->{sum_absolute_x} = 20;
 	
-	$self->{columns}[$column_no]->set_cell_data_func($renderer, sub { $self->render_pixbuf_cell( @_ ); } );
+	$self->{columns}[$column_no]->set_cell_data_func( $renderer, sub { $self->render_pixbuf_cell( @_ ); } );
 	
 	# ... and the TreeStore column that goes with it
 	push @{$self->{ts_def}}, "Glib::Int";
 	
 	$column_no ++;
-		
+	
 	# Now set up the model and columns
 	for my $field ( @{$self->{fields}} ) {
 		
+		# Rename 'none' renderer to 'hidden' ... support legacy software using the old term
+		if ( $field->{renderer} eq "none" ) {
+			$field->{renderer} = "hidden";
+		}
+		
 		$field->{column} = $column_no - 1; # The field number is 1 off the column number ( status column )
 		
-		if ( !$field->{renderer} || $field->{renderer} eq "text" || $field->{renderer} eq "number" ) {
+		if ( $field->{renderer} eq "text" || $field->{renderer} eq "hidden" || $field->{renderer} eq "number" ) {
 			
-			#$renderer = Gtk2::CellRendererText->new;
-			$renderer = MOFO::CellRendererText->new;
+			if ( $field->{renderer} eq "hidden" ) {
+				$renderer = Gtk2::CellRendererText->new; # No need for custom one if it's not being displayed
+			} else {
+				$renderer = MOFO::CellRendererText->new;
+			}
+			
 			$renderer->{column} = $column_no;
 			
 			if ( ! $self->{readonly} ) {
@@ -145,10 +189,14 @@ sub setup_treeview {
 			}
 			
 			$self->{columns}[$column_no] = Gtk2::TreeViewColumn->new_with_attributes(
-													$field->{name},
-													$renderer,
-													'text'	=> $column_no
-												);
+																						$field->{name},
+																						$renderer,
+																						'text'	=> $column_no
+																					);
+			
+			if ( $field->{renderer} eq "hidden" ) {
+				$self->{columns}[$column_no]->set_visible( FALSE );
+			}
 			
 			$renderer->signal_connect( edited => sub { $self->process_text_editing( @_ ); } );
 			
@@ -192,13 +240,24 @@ sub setup_treeview {
 			$renderer = Gtk2::CellRendererCombo->new;
 			$renderer->{column} = $column_no;
 			
+			# Get the data type and attach it to the renderer, so we know what kind of comparison
+			# ( string vs numeric ) to use later
+			my $sql_name = $self->column_name_to_sql_name( $field->{name} );
+			my $fieldtype = $self->{column_info}->{$sql_name}->{TYPE_NAME};
+			
+			if ( $fieldtype =~ m/INT/ ) {
+				$renderer->{data_type} = "numeric";
+			} else {
+				$renderer->{data_type} = "string";
+			}
+			
 			if ( ! $self->{readonly} ) {
 				
 				$renderer->set(
-						editable	=> TRUE,
-						text_column	=> 1,
-						has_entry	=> TRUE
-					      );
+								editable	=> TRUE,
+								text_column	=> 1,
+								has_entry	=> TRUE
+							  );
 				
 				# It's possible that we won't have a model at this point
 				if ( $field->{model} ) {
@@ -243,10 +302,21 @@ sub setup_treeview {
 			
 			if ( ! $self->{readonly} ) {
 				$renderer->set(
-						editable	=> TRUE,
-						text_column	=> 1,
-						has_entry	=> TRUE
-					      );
+								editable	=> TRUE,
+								text_column	=> 1,
+								has_entry	=> TRUE
+							  );
+			}
+			
+			# Get the data type and attach it to the renderer, so we know what kind of comparison
+			# ( string vs numeric ) to use later
+			my $sql_name = $self->column_name_to_sql_name( $field->{name} );
+			my $fieldtype = $self->{column_info}->{$sql_name}->{TYPE_NAME};
+			
+			if ( $fieldtype =~ m/INT/ ) {
+				$renderer->{data_type} = "numeric";
+			} else {
+				$renderer->{data_type} = "string";
 			}
 			
 			$self->{columns}[$column_no] = Gtk2::TreeViewColumn->new_with_attributes(
@@ -314,11 +384,6 @@ sub setup_treeview {
 			# Add a string column to the TreeStore definition ( recreated when we query() )
 			push @{$self->{ts_def}}, "Glib::String";
 			
-		} elsif ( $field->{renderer} eq "none" ) {
-			
-			print "Adding hidden field " . $field->{name} . "\n";
-			push @{$self->{ts_def}}, "Glib::String";
-			
 		} else {
 			
 			warn "Unknown render: " . $field->{renderer} . "\n";
@@ -331,7 +396,7 @@ sub setup_treeview {
 		}
 		
 		# Add any absolute x values to our total and set their column size ( once only for these )
-		if ($field->{x_absolute}) {
+		if ( $field->{x_absolute} ) {
 			$self->{sum_absolute_x} += $field->{x_absolute};
 			$self->{columns}[$column_no]->set_fixed_width($field->{x_absolute});
 		}
@@ -364,10 +429,10 @@ sub setup_treeview {
 	push @{$self->{ts_def}}, "Glib::Int";
 	
 	# Now set up icons for use in the record status column
-	$self->{icons}[UNCHANGED]	= $self->{treeview}->render_icon("gtk-yes",	"menu");
-	$self->{icons}[CHANGED]		= $self->{treeview}->render_icon("gtk-refresh",	"menu");
-	$self->{icons}[INSERTED]	= $self->{treeview}->render_icon("gtk-add",	"menu");
-	$self->{icons}[DELETED]		= $self->{treeview}->render_icon("gtk-delete",	"menu");
+	$self->{icons}[UNCHANGED]	= $self->{treeview}->render_icon( "gtk-yes",		"menu" );
+	$self->{icons}[CHANGED]		= $self->{treeview}->render_icon( "gtk-refresh",	"menu" );
+	$self->{icons}[INSERTED]	= $self->{treeview}->render_icon( "gtk-add",		"menu" );
+	$self->{icons}[DELETED]		= $self->{treeview}->render_icon( "gtk-delete",		"menu" );
 	
 	$self->{resize_signal} = $self->{treeview}->signal_connect( size_allocate => sub { $self->size_allocate( @_ ); } );
 	
@@ -406,16 +471,24 @@ sub render_combo_cell {
 		
 		while ($combo_iter) {
 			
-			# TODO: I'm not really sure if we need to test for the type of $key_value
-			# I can *possibly* remove this...
-			if ( ref($key_value) eq "int" ) {
-				if ($combo_model->get($combo_iter, 0) == $key_value) {
+			if ( $renderer->{data_type} eq "numeric" ) {
+				if (
+						$combo_model->get( $combo_iter, 0 )
+							&& $key_value
+							&& $combo_model->get( $combo_iter, 0 ) == $key_value
+				   )
+				{
 					$found_match = TRUE;
 					$renderer->set( text	=> $combo_model->get( $combo_iter, 1 ) );
 					last;
 				}
 			} else {
-				if ($combo_model->get($combo_iter, 0) eq $key_value) {
+				if (
+						$combo_model->get( $combo_iter, 0 )
+							&& $key_value
+							&& $combo_model->get( $combo_iter, 0 ) eq $key_value
+				   )
+				{
 					$found_match = TRUE;
 					$renderer->set( text	=> $combo_model->get( $combo_iter, 1 ) );
 					last;
@@ -438,6 +511,47 @@ sub render_combo_cell {
 	}
 	
 	return FALSE;
+	
+}
+
+sub refresh_dynamic_combos {
+
+	# If this column has dependant cells ...
+	# ( ie dynamic combos - in this case *this* renderer will have an array of
+	# dependant_columns pointing to the *dependant* columns )
+	#  ... refresh them
+	
+	my ( $self, $renderer, $path ) = @_;
+	
+	my $model = $self->{treeview}->get_model;
+	my $iter = $model->get_iter ($path); # I've been told not to pass iters around, so we'd better get a fresh one
+	
+	if ( $renderer->{dependant_columns} ) {
+		
+		# Get the current row in an array
+		my @data = $model->get( $model->get_iter( $path ) );
+		
+		# We don't want the status column in there - it's not in the SQL fieldlist
+		my $status = shift( @data );
+		
+		for my $dependant ( @{$renderer->{dependant_columns}} ) {
+			
+			# Create a new model
+			my $new_model = $self->create_dynamic_model(
+															$self->{fields}[$dependant]->{model_setup},
+															\@data
+													   );
+			
+			# Dump the combo model in the main TreeView model
+			$model->set(
+					$iter,
+					$self->{fields}[$dependant]->{dynamic_model_position},
+					$new_model
+				   );
+			
+		}
+		
+	}
 	
 }
 
@@ -505,31 +619,10 @@ sub process_text_editing {
 		}
 		
 		$model->set( $iter, $column_no, $new_text );
-		
-		# If this column has dependant cells ( ie dynamic combos ) pointing at it, refresh them
+        
+		# Refresh dependant columns if any
 		if ( $renderer->{dependant_columns} ) {
-			for my $dependant ( @{$renderer->{dependant_columns}} ) {
-				
-				# Get the current row in an array
-				my @data = $model->get( $model->get_iter ($path) );
-				
-				# We don't want the status column in there - it's not in the SQL fieldlist
-				my $status = shift(@data);
-				
-				# Create a new model
-				my $new_model = $self->create_dynamic_model(
-									$self->{fields}[$dependant]->{model_setup},
-									\@data
-								       );
-				
-				# Dump the combo model in the main TreeView model
-				$model->set(
-						$iter,
-						$self->{fields}[$dependant]->{dynamic_model_position},
-						$new_model
-					   );
-				
-			}
+			$self->refresh_dynamic_combos( $renderer, $path );
 		}
 		
 	}
@@ -539,17 +632,22 @@ sub process_text_editing {
 }
 
 sub process_toggle {
-	  
-	  my ( $self, $renderer, $text_path, $something ) = @_;
-	  
-	  my $path = Gtk2::TreePath->new ($text_path);
-	  my $model = $self->{treeview}->get_model;
-	  my $iter = $model->get_iter ($path);
-	  my $old_value = $model->get( $iter, $renderer->{column} );
-	  $model->set ( $iter, $renderer->{column}, ! $old_value );
-	  
-	  return FALSE;
-	  
+	
+	my ( $self, $renderer, $text_path, $something ) = @_;
+	
+	my $path = Gtk2::TreePath->new ($text_path);
+	my $model = $self->{treeview}->get_model;
+	my $iter = $model->get_iter ($path);
+	my $old_value = $model->get( $iter, $renderer->{column} );
+	$model->set ( $iter, $renderer->{column}, ! $old_value );
+	
+	# Refresh dependant columns if any
+	if ( $renderer->{dependant_columns} ) {
+		$self->refresh_dynamic_combos( $renderer, $path );
+	}
+	
+	return FALSE;
+	
 }
 
 sub query {
@@ -870,11 +968,30 @@ sub insert {
 	my $model = $self->{treeview}->get_model;
 	my $iter = $model->append;
 	
+	# Append any remaining fields ( ie that haven't been explicitely defined in @columns_and_values )
+	# with default values from the database to the @columns_and_values array
+	
+	for my $column_no ( 0 .. @{$self->{fieldlist}} - 1) {
+		my $found = FALSE;
+		for ( my $x = 0; $x < ( scalar(@columns_and_values) / 2 ); $x ++ ) {
+			if ( $columns_and_values[ ( $x * 2 ) ] - 1 == $column_no ) { # The array is 2 wide, plus 1 for status
+				$found = TRUE;
+				last;
+			}
+		}
+		if ( ! $found ) {
+			push
+				@columns_and_values,
+				$column_no + 1, # Add 1 for status
+				$self->{column_info}->{$self->{fieldlist}[$column_no]}->{COLUMN_DEF};
+		}
+	}
+	
 	my @new_record;
 	
 	push @new_record, $iter, STATUS_COLUMN, INSERTED;
 	
-	if (scalar(@columns_and_values)) {
+	if ( scalar(@columns_and_values) ) {
 		push @new_record, @columns_and_values;
 	}
 	
@@ -944,19 +1061,52 @@ sub size_allocate {
 
 sub column_from_name {
 	
-	# This function takes a field name and returns the column that the field is in by
+	# This function takes an *SQL* field name and returns the column that the field is in by
 	# walking through the array $self->{fieldlist}
+	
+	# It returns the column no in the MODEL
 	
 	my ( $self, $sql_fieldname ) = @_;
 	
-	my $counter = 1; # Start at 1 because column is status column
+	my $counter = 1; # Start at 1, because column 0 is status column
 	
-	for my $field (@{$self->{fieldlist}}) {
-		if ($field eq $sql_fieldname) {
+	for my $field ( @{$self->{fieldlist}} ) {
+		if ( $field eq $sql_fieldname ) {
 			return $counter;
 		}
 		$counter ++;
 	}
+	
+}
+
+sub column_from_column_name {
+	
+	# This function takes a *COLUMN* name and returns the column that the field is in by
+	# walking through the array $self->{fields}
+	
+	# It returns the column no in the MODEL
+	
+	my ( $self, $column_name ) = @_;
+	
+	my $counter = 1; # Start at 1, because column 0 is a status column
+	
+	for my $field ( @{$self->{fields}} ) {
+		if ( $field->{name} eq $column_name ) {
+			return $counter;
+		}
+		$counter ++;
+	}
+	
+}
+
+sub column_name_to_sql_name {
+	
+	# This function converts a column name to an SQL field name
+	
+	my ( $ self, $column_name ) = @_;
+	
+	my $column_no = $self->column_from_column_name ( $column_name );
+	return $self->{fieldlist}[$column_no - 1]; # minus 1 as $self->{fieldlist} doesn't have a status 'column'
 	
 }
 
@@ -1902,10 +2052,13 @@ Each item in the 'fields' key is a hash, with the following possible keys:
                     - dynamic_combo  - combo box that depends on values in the current row
                     - toggle         - good for boolean values
                     - date           - good for dates - MUST be in YYYY-MM-DD format ( ie most databases should be OK )
-                    - none           - use this for hidden columns
+                    - hidden         - use this for hidden columns
   model           - a TreeModel to use with a combo renderer
   model_setup     - object describing the setup of a dynamic_combo ( see below )
   validation      - a sub to run after data entry and before the value is accepted to validate data
+
+As of version 0.8, the database schema is queried and a suitable renderer is automatically selected
+if one is not specified. You will of course still have to set up combos yourself.
 
 In the case of a 'number' renderer, the following keys are also used:
 
@@ -2001,6 +2154,9 @@ You can optionally set default values by passing them as an array of column numb
 
 Note that you can use the column_from_name method for fetching column numbers from field names ( see below ).
 
+As of version 0.8, default values from the database schema are automatically inserted into all columns that
+aren't explicitely set as above.
+
 =head2 delete
 
 Marks all selected records for deletion, and sets the record status indicator to a 'delete' icon.
@@ -2047,6 +2203,19 @@ scrollbar in the scrolled window ). Immediately after the resize, when our size_
 size of each column, the scrollbar will no longer be needed and will disappear. Not perfect, but it works. It also
 doesn't produce *too* much flicker on my system, but resize operations are noticably slower. What can I say?
 Patches appreciated :)
+
+=head2 Use of Database Schema
+
+Version 0.8 introduces querying the database schema to inspect column attributes. This considerably streamlines
+the process of setting up the datasheet and inserting records.
+
+If you don't define a renderer, an appropriate one is selected for you based on the field type.
+The only renderers you should now have to explicitely define
+are 'hidden', 'combo', and 'dynamic_combo'  - the latter 2 you will obviously still have to set up by providing
+a model.
+
+When inserting a new record, default values from the database field definitions are also used ( unless you
+specify another value via the insert() method ).
 
 =head2 CellRendererCombo
 
