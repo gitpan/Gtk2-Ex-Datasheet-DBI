@@ -1,5 +1,13 @@
 CHANGELOG
 
+Version 0.9, released 20-Sep-2005
+    
+    Add some logic to MOFO::CellRendererDate so that popup calendar gets placed completely on-screen
+    Added MOFO::CellRendererTime and use when a Time column is encountered
+    Dialog question asking user whether to apply if window is closed with unapplied changes to recordset
+    Add missing code to process sql_order_by
+    Renamed readonly flag to read_only ( for consistency ) and hide status column when read_only
+    
 Version 0.8, released 15-Aug-2005
     
     Refresh dynamic combos when a toggle that they depend on is edited

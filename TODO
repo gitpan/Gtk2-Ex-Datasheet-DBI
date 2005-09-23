@@ -1,3 +1,11 @@
 Things, to do, in order of priority:
 
+- Support custom functions for colour formatting cells?
+    - Too processor-intensive?
+    - Trigger from process_xxx_editing subs?
+
+- What's up with CellRenderSpinButton? It's been broken for quite a while now ...
+
+- Support non-db-server usage, such as SQLite ( doesn't support $dbh->column_info )
+
 - Figure out what's up with blocking the size_allocate signal

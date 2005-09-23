@@ -13,17 +13,17 @@ use warnings;
 use Glib qw/TRUE FALSE/;
 
 use Gtk2::Ex::Dialogs (
-			destroy_with_parent	=> TRUE,
-			modal				=> TRUE,
-			no_separator		=> FALSE
-		      );
+						destroy_with_parent	=> TRUE,
+						modal				=> TRUE,
+						no_separator		=> FALSE
+					  );
 
 # Record Status Indicators
 use constant {
-			UNCHANGED			=> 0,
-			CHANGED				=> 1,
-			INSERTED			=> 2,
-			DELETED				=> 3
+						UNCHANGED			=> 0,
+						CHANGED				=> 1,
+						INSERTED			=> 2,
+						DELETED				=> 3
 };
 
 # Record Status column
@@ -32,7 +32,7 @@ use constant{
 };
 
 BEGIN {
-			$Gtk2::Ex::DBI::Datasheet::VERSION = '0.8';
+			$Gtk2::Ex::DBI::Datasheet::VERSION = '0.9';
 }
 
 sub new {
@@ -50,6 +50,7 @@ sub new {
 			treeview		=> $$req{treeview},		# The Gtk2::Treeview to connect to
 			fields			=> $$req{fields},		# Field definitions
 			multi_select	=> $$req{multi_select},	# Boolean to enable multi selection mode
+			read_only		=> $$req{read_only},	# Boolean to indicate read-only mode
 			on_apply		=> $$req{on_apply}		# Code that runs *after* each *record* is applied
 	};
 	
@@ -59,6 +60,39 @@ sub new {
 	
 	# Remember the primary key column
 	$self->{primary_key_column} = scalar( @{$self->{fieldlist}} ) + 1 + ( $self->{dynamic_models} || 0 );
+	
+	# Check recordset status when window is destroyed
+	my $parent_widget = $self->{treeview}->get_parent;
+	my $toplevel_widget;
+	
+	# Climb up through the widget heirarchy to find the toplevel widget ( the window )
+	while ( $parent_widget ) {
+		$toplevel_widget = $parent_widget;
+		$parent_widget = $toplevel_widget->get_parent;
+	}
+	
+	$toplevel_widget->signal_connect( delete_event => sub {
+		if ( $self->any_changes ) {
+			my $answer = Gtk2::Ex::Dialogs::Question->new_and_run(
+				title	=> "Apply changes to " . $self->{table} . " before closing?",
+				text	=> "There are changes to the current datasheet ( " . $self->{table} . " )\n"
+					. "that haven't yet been applied. Would you like to apply them before closing the form?"
+																 );
+			# We return FALSE to allow the default signal handler to
+			# continue with destroying the window - all we wanted to do was check
+			# whether to apply records or not
+			if ( $answer ) {
+				if ( $self->apply ) {
+					return FALSE;
+				} else {
+					# ie don't allow the form to close if there was an error applying
+					return TRUE;
+				}
+			} else {
+				return FALSE;
+			}
+		}
+	} );
 	
 	$self->query;
 	
@@ -139,6 +173,8 @@ sub setup_treeview {
 				$field->{renderer} = "text";
 			} elsif ( $fieldtype eq "TIMESTAMP" || $fieldtype eq "DATE" ) {
 				$field->{renderer} = "date";
+			} elsif ( $fieldtype eq "TIME" ) {
+				$field->{renderer} = "time";
 			} else {
 				$field->{renderer} = "text";
 			}
@@ -154,8 +190,15 @@ sub setup_treeview {
 	
 	# Set up fixed size for status indicator and add to sum of fixed sizes
 	$self->{columns}[$column_no]->set_sizing("fixed");
-	$self->{columns}[$column_no]->set_fixed_width(20);
-	$self->{sum_absolute_x} = 20;
+	my $column_width = 20;
+	
+	# Hide status indicator if read-only
+	if ( $self->{read_only} ) {
+		$column_width = 0;
+	}
+	
+	$self->{columns}[$column_no]->set_fixed_width( $column_width );
+	$self->{sum_absolute_x} = $column_width;
 	
 	$self->{columns}[$column_no]->set_cell_data_func( $renderer, sub { $self->render_pixbuf_cell( @_ ); } );
 	
@@ -174,7 +217,8 @@ sub setup_treeview {
 		
 		$field->{column} = $column_no - 1; # The field number is 1 off the column number ( status column )
 		
-		if ( $field->{renderer} eq "text" || $field->{renderer} eq "hidden" || $field->{renderer} eq "number" ) {
+		if ( $field->{renderer} eq "text" || $field->{renderer} eq "hidden"
+			|| $field->{renderer} eq "number" ) {
 			
 			if ( $field->{renderer} eq "hidden" ) {
 				$renderer = Gtk2::CellRendererText->new; # No need for custom one if it's not being displayed
@@ -182,9 +226,14 @@ sub setup_treeview {
 				$renderer = MOFO::CellRendererText->new;
 			}
 			
+			# Mark the renderer for time columns so we can do validation on them later
+			if ( $field->{renderer} eq "time" ) {
+				$renderer->{time} = TRUE;
+			}
+			
 			$renderer->{column} = $column_no;
 			
-			if ( ! $self->{readonly} ) {
+			if ( ! $self->{read_only} ) {
 				$renderer->set( editable => TRUE );
 			}
 			
@@ -251,7 +300,7 @@ sub setup_treeview {
 				$renderer->{data_type} = "string";
 			}
 			
-			if ( ! $self->{readonly} ) {
+			if ( ! $self->{read_only} ) {
 				
 				$renderer->set(
 								editable	=> TRUE,
@@ -300,7 +349,7 @@ sub setup_treeview {
 			# Keep this position number in the field has as well
 			$field->{dynamic_model_position} = $renderer->{dynamic_model_position};
 			
-			if ( ! $self->{readonly} ) {
+			if ( ! $self->{read_only} ) {
 				$renderer->set(
 								editable	=> TRUE,
 								text_column	=> 1,
@@ -343,7 +392,7 @@ sub setup_treeview {
 			
 			$renderer = Gtk2::CellRendererToggle->new;
 			
-			if ( ! $self->{readonly} ) {
+			if ( ! $self->{read_only} ) {
 				$renderer->set( activatable	=> TRUE );
 			}
 			
@@ -367,7 +416,7 @@ sub setup_treeview {
 			$renderer = MOFO::CellRendererDate->new;
 			$renderer->{column} = $column_no;
 			
-			if ( ! $self->{readonly} ) {
+			if ( ! $self->{read_only} ) {
 				$renderer->set( mode => "editable" );
 			}
 			
@@ -375,6 +424,28 @@ sub setup_treeview {
 													$field->{name},
 													$renderer,
 													'date'	=> $column_no
+												);
+			
+			$renderer->signal_connect( edited => sub { $self->process_text_editing( @_ ); } );
+			
+			$self->{treeview}->append_column($self->{columns}[$column_no]);
+			
+			# Add a string column to the TreeStore definition ( recreated when we query() )
+			push @{$self->{ts_def}}, "Glib::String";
+			
+		} elsif ( $field->{renderer} eq "time" ) {
+			
+			$renderer = MOFO::CellRendererTime->new;
+			$renderer->{column} = $column_no;
+			
+			if ( ! $self->{read_only} ) {
+				$renderer->set( mode => "editable" );
+			}
+			
+			$self->{columns}[$column_no] = Gtk2::TreeViewColumn->new_with_attributes(
+													$field->{name},
+													$renderer,
+													'time'	=> $column_no
 												);
 			
 			$renderer->signal_connect( edited => sub { $self->process_text_editing( @_ ); } );
@@ -399,6 +470,12 @@ sub setup_treeview {
 		if ( $field->{x_absolute} ) {
 			$self->{sum_absolute_x} += $field->{x_absolute};
 			$self->{columns}[$column_no]->set_fixed_width($field->{x_absolute});
+		}
+		
+		# Set up static colouring
+		if ( $field->{foreground_colour} ) {
+			$renderer->set( foreground		=> $field->{foreground_colour} );
+			$renderer->set( foreground_set	=> TRUE );
 		}
 		
 		$column_no ++;
@@ -689,15 +766,19 @@ sub query {
 		
 	}
 	
-	if (defined $sql_where) {
+	if ( $sql_where ) {
 		$self->{sql_where} = $sql_where;
 	}
 	
 	my $sth;
 	my $sql = $self->{sql_select} . ", " . $self->{primary_key} . " from " . $self->{table};
 	
-	if ($self->{sql_where}) {
+	if ( $self->{sql_where} ) {
 		$sql .= " " . $self->{sql_where};
+	}
+	
+	if ( $self->{sql_order_by} ) {
+		$sql .= " " . $self->{sql_order_by};
 	}
 	
 	eval {
@@ -848,10 +929,10 @@ sub apply {
 			
 			# We process the insert / update operations in a similar fashion
 			
-			my $sql;			# Final SQL to send to DB server
-			my $sql_fields;			# A comma-separated list of fields
-			my @values;			# An array of values taken from the current record
-			my $placeholders;		# A string of placeholders, eg ( ?, ?, ? )
+			my $sql;					# Final SQL to send to DB server
+			my $sql_fields;				# A comma-separated list of fields
+			my @values;					# An array of values taken from the current record
+			my $placeholders;			# A string of placeholders, eg ( ?, ?, ? )
 			my $field_index = 1;		# Start at offset=1 to skip over changed flag
 			my $primary_key = undef;	# We pass this to the on_apply() function
 			
@@ -925,12 +1006,12 @@ sub apply {
 				# people use our constants. I think, anyway ...
 				my $status_txt;
 				
-				if ( $status == INSERTED ) {
-					$status_txt = "inserted";
-				} elsif ( $status == CHANGED ) {
-					$status_txt = "changed";
-				} elsif ( $status == DELETED ) {
-					$status_txt = "deleted"
+				if ( $status		== INSERTED ) {
+					$status_txt		= "inserted";
+				} elsif ( $status	== CHANGED ) {
+					$status_txt		= "changed";
+				} elsif ( $status	== DELETED ) {
+					$status_txt		= "deleted";
 				}
 				
 				# Do people want the whole row? I don't. Maybe others would? Wait for requests...
@@ -1239,6 +1320,29 @@ sub create_dynamic_model {
 	$dbh->disconnect;
 	
 	return $liststore;
+	
+}
+
+sub any_changes {
+	
+	# This function loops through all records and returns TRUE if any record status is not UNCHANGED
+	
+	my $self = shift;
+	
+	my $model = $self->{treeview}->get_model;
+	my $iter = $model->get_iter_first;
+	
+	while ($iter) {
+		my $status = $model->get($iter, STATUS_COLUMN);
+		if ( $status == UNCHANGED ) {
+			$iter = $model->iter_next($iter);
+			next;
+		} else {
+			return TRUE;
+		}
+	}
+	
+	return FALSE;
 	
 }
 
@@ -1846,15 +1950,26 @@ sub START_EDITING {
   # Necessary to get the correct allocation of the popup.
   $popup -> move(-500, -500);
   $popup -> show_all();
-
-  # Align the top right edge of the popup with the the bottom right edge of the
-  # cell.
+  
+  # Figure out where to put the popup - ie don't put it offscreen,
+  # as it's not movable ( by the user )
+  my $screen_height = $popup->get_screen->get_height;
+  my $requisition = $popup->size_request();
+  my $popup_width = $requisition->width;
+  my $popup_height = $requisition->height;
   my ($x_origin, $y_origin) =  $view -> get_bin_window() -> get_origin();
-
-  $popup -> move(
-    $x_origin + $cell_area -> x() + $cell_area -> width() - $popup -> allocation() -> width(),
-    $y_origin + $cell_area -> y() + $cell_area -> height()
-  );
+  my ($popup_x, $popup_y);
+  
+  $popup_x = $x_origin + $cell_area->x() + $cell_area->width() - $popup_width;
+  $popup_x = 0 if $popup_x < 0;
+  
+  $popup_y = $y_origin + $cell_area -> y() + $cell_area -> height();
+  
+  if ( $popup_y + $popup_height > $screen_height ) {
+	$popup_y = $y_origin + $cell_area -> y() - $popup_height;
+  }
+  
+  $popup -> move( $popup_x, $popup_y );
 
   # Grab the focus and the pointer.
   Gtk2 -> grab_add($popup);
@@ -1918,6 +2033,295 @@ sub RENDER {
 
   my $layout = $cell -> get_layout($widget);
   $layout -> set_text($cell -> get_date_string());
+
+  my ($x_offset, $y_offset, $width, $height) = $cell -> calc_size($layout);
+
+  $widget -> get_style -> paint_layout($window,
+                                       $state,
+                                       1,
+                                       $cell_area,
+                                       $widget,
+                                       "cellrenderertext",
+                                       $cell_area -> x() + $x_offset + x_padding,
+                                       $cell_area -> y() + $y_offset + y_padding,
+                                       $layout);
+
+  $widget -> get_style -> paint_arrow ($window,
+                                       $widget->state,
+                                       'none',
+                                       $cell_area,
+                                       $cell -> { _arrow },
+                                       "",
+                                       "down",
+                                       1,
+                                       $cell_area -> x + $cell_area -> width - arrow_width,
+                                       $cell_area -> y + $cell_area -> height - arrow_height - 2,
+                                       arrow_width - 3,
+                                       arrow_height);
+}
+
+1;
+
+#######################################################################################
+# CellRendererTime
+#######################################################################################
+
+# Copyright (C) 2005 by Daniel Kasak ...
+#  ... basically a slightly modified CellRendererDate ( see above )
+# 
+# This library is free software; you can redistribute it and/or modify it under
+# the terms of the GNU Library General Public License as published by the Free
+# Software Foundation; either version 2.1 of the License, or (at your option)
+# any later version.
+# 
+# This library is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+# FOR A PARTICULAR PURPOSE.  See the GNU Library General Public License for
+# more details.
+# 
+# You should have received a copy of the GNU Library General Public License
+# along with this library; if not, write to the Free Software Foundation, Inc.,
+# 59 Temple Place - Suite 330, Boston, MA  02111-1307  USA.
+
+use strict;
+use Gtk2 -init;
+
+package MOFO::CellRendererTime;
+
+use Glib::Object::Subclass
+  "Gtk2::CellRenderer",
+  signals => {
+    edited => {
+      flags => [qw(run-last)],
+      param_types => [qw(Glib::String Glib::Scalar)],
+    },
+  },
+  properties => [
+    Glib::ParamSpec -> boolean("editable", "Editable", "Can I change that?", 0, [qw(readable writable)]),
+    Glib::ParamSpec -> string("time", "Time", "What's the time again?", "", [qw(readable writable)]),
+  ]
+;
+
+use constant x_padding => 2;
+use constant y_padding => 3;
+
+use constant arrow_width => 15;
+use constant arrow_height => 15;
+
+sub hide_popup {
+  my ($cell) = @_;
+
+  Gtk2 -> grab_remove($cell -> { _popup });
+  $cell -> { _popup } -> hide();
+}
+
+sub get_time {
+  my ($cell) = @_;
+
+  my $text = $cell -> get("time");
+  my ($h, $m, $s) = split(/:/, $text);
+  
+  return ($h, $m, $s);
+}
+
+sub add_padding {
+  my ($cell, $h, $m, $s) = @_;
+  return ( sprintf("%02d",$h), sprintf("%02d", $m), sprintf("%02d", $s) );
+}
+
+sub INIT_INSTANCE {
+  my ($cell) = @_;
+
+  my $popup = Gtk2::Window -> new ('popup');
+  my $vbox = Gtk2::VBox -> new(0, 0);
+
+  my $h_spinbutton = Gtk2::SpinButton -> new_with_range( 0, 23, 1 );
+  my $m_spinbutton = Gtk2::SpinButton -> new_with_range( 0, 59, 1 );
+  my $s_spinbutton = Gtk2::SpinButton -> new_with_range( 0, 59, 1 );
+  my $colon_1 = Gtk2::Label->new(":");
+  my $colon_2 = Gtk2::Label->new(":");
+  
+  my $spin_hbox = Gtk2::HBox -> new(0, 0);
+  my $buttons_hbox = Gtk2::HBox->new(0, 0);
+  
+  $cell -> {_arrow} = Gtk2::Arrow -> new("down", "none");
+  
+  $spin_hbox->pack_start( $h_spinbutton,	1, 1, 0 );
+  $spin_hbox->pack_start( $colon_1,			1, 1, 0 );
+  $spin_hbox->pack_start( $m_spinbutton,	1, 1, 0 );
+  $spin_hbox->pack_start( $colon_2,			1, 1, 0 );
+  $spin_hbox->pack_start( $s_spinbutton,	1, 1, 0 );
+  
+  my $ok = Gtk2::Button->new_from_stock('gtk-ok');
+  
+  $buttons_hbox->pack_start( $ok, 1, 1, 0 );
+  
+  $vbox -> pack_start( $spin_hbox, 0, 0, 0 );
+  $vbox->pack_start( $buttons_hbox, 0, 0, 0 );
+  
+  # We can't just provide the callbacks now because they might need access to
+  # cell-specific variables.  And we can't just connect the signals in
+  # START_EDITING because we'd be connecting many signal handlers to the same
+  # widgets.
+  
+  $ok -> signal_connect(
+	clicked => sub {
+						$cell -> { _ok_clicked_callback } -> (@_)
+							if ( exists( $cell -> { _ok_clicked_callback } ) );
+	}
+					   );
+    
+  # Find out if the click happended outside of our window.  If so, hide it.
+  # Largely copied from Planner (the former MrProject).
+
+  # Implement via Gtk2::get_event_widget?
+  $popup -> signal_connect(button_press_event => sub {
+    my ($popup, $event) = @_;
+
+    if ($event -> button() == 1) {
+      my ($x, $y) = ($event -> x_root(), $event -> y_root());
+      my ($xoffset, $yoffset) = $popup -> window() -> get_root_origin();
+
+      my $allocation = $popup -> allocation();
+
+      my $x1 = $xoffset + 2 * $allocation -> x();
+      my $y1 = $yoffset + 2 * $allocation -> y();
+      my $x2 = $x1 + $allocation -> width();
+      my $y2 = $y1 + $allocation -> height();
+
+      unless ($x > $x1 && $x < $x2 && $y > $y1 && $y < $y2) {
+        $cell -> hide_popup();
+        return 1;
+      }
+    }
+
+    return 0;
+  });
+
+  $popup -> add($vbox);
+
+  $cell -> { _popup } = $popup;
+  $cell -> { _h_spinbutton } = $h_spinbutton;
+  $cell -> { _m_spinbutton } = $m_spinbutton;
+  $cell -> { _s_spinbutton } = $s_spinbutton;
+  
+}
+
+sub START_EDITING {
+  my ($cell, $event, $view, $path, $background_area, $cell_area, $flags) = @_;
+
+  my $popup = $cell -> { _popup };
+  my $h_spinbutton = $cell -> { _h_spinbutton };
+  my $m_spinbutton = $cell -> { _m_spinbutton };
+  my $s_spinbutton = $cell -> { _s_spinbutton };
+  
+  my ($h, $m, $s) = $cell -> get_time();
+  
+  $h_spinbutton->set_text($h);
+  $m_spinbutton->set_text($m);
+  $s_spinbutton->set_text($s);
+  
+  $cell -> { _ok_clicked_callback } = sub {
+    
+	my ( $button ) = @_;
+	my $h = $h_spinbutton->get_text;
+	my $m = $m_spinbutton->get_text;
+	my $s = $s_spinbutton->get_text;
+	
+	$cell -> signal_emit(
+							edited => $path,
+							join( ":", $cell -> add_padding($h, $m, $s ) )
+						);
+	
+	$cell -> hide_popup();
+  };
+  
+  # Necessary to get the correct allocation of the popup.
+  $popup -> move(-500, -500);
+  $popup -> show_all();
+  
+  # Figure out where to put the popup - ie don't put it offscreen,
+  # as it's not movable ( by the user )
+  my $screen_height = $popup->get_screen->get_height;
+  my $requisition = $popup->size_request();
+  my $popup_width = $requisition->width;
+  my $popup_height = $requisition->height;
+  my ($x_origin, $y_origin) =  $view -> get_bin_window() -> get_origin();
+  my ($popup_x, $popup_y);
+  
+  $popup_x = $x_origin + $cell_area->x() + $cell_area->width() - $popup_width;
+  $popup_x = 0 if $popup_x < 0;
+  
+  $popup_y = $y_origin + $cell_area -> y() + $cell_area -> height();
+  
+  if ( $popup_y + $popup_height > $screen_height ) {
+	$popup_y = $y_origin + $cell_area -> y() - $popup_height;
+  }
+  
+  $popup -> move( $popup_x, $popup_y );
+  
+  # Grab the focus and the pointer.
+  Gtk2 -> grab_add($popup);
+  $popup -> grab_focus();
+
+  Gtk2::Gdk -> pointer_grab($popup -> window(),
+                            1,
+                            [qw(button-press-mask
+                                button-release-mask
+                                pointer-motion-mask)],
+                            undef,
+                            undef,
+                            0);
+
+  return;
+}
+
+sub get_time_string {
+  my $cell = shift;
+  return $cell->get ('time');
+}
+
+sub calc_size {
+  my ($cell, $layout) = @_;
+  my ($width, $height) = $layout -> get_pixel_size();
+
+  return (0,
+          0,
+          $width + x_padding * 2 + arrow_width,
+          $height + y_padding * 2);
+}
+
+sub GET_SIZE {
+  my ($cell, $widget, $cell_area) = @_;
+
+  my $layout = $cell -> get_layout($widget);
+  $layout -> set_text($cell -> get_time_string());
+
+  return $cell -> calc_size($layout);
+}
+
+sub get_layout {
+  my ($cell, $widget) = @_;
+
+  return $widget -> create_pango_layout("");
+}
+
+sub RENDER {
+  my ($cell, $window, $widget, $background_area, $cell_area, $expose_area, $flags) = @_;
+  my $state;
+
+  if ($flags & 'selected') {
+    $state = $widget -> has_focus()
+      ? 'selected'
+      : 'active';
+  } else {
+    $state = $widget -> state() eq 'insensitive'
+      ? 'insensitive'
+      : 'normal';
+  }
+
+  my $layout = $cell -> get_layout($widget);
+  $layout -> set_text($cell -> get_time_string());
 
   my ($x_offset, $y_offset, $width, $height) = $cell -> calc_size($layout);
 
@@ -2052,6 +2456,7 @@ Each item in the 'fields' key is a hash, with the following possible keys:
                     - dynamic_combo  - combo box that depends on values in the current row
                     - toggle         - good for boolean values
                     - date           - good for dates - MUST be in YYYY-MM-DD format ( ie most databases should be OK )
+                    - time           - supurb for times - MUST be in 24-hour format
                     - hidden         - use this for hidden columns
   model           - a TreeModel to use with a combo renderer
   model_setup     - object describing the setup of a dynamic_combo ( see below )
