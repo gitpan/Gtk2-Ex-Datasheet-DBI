@@ -1,5 +1,14 @@
 Things, to do, in order of priority:
 
+- *** Fix data entry issue: clicking outside treeview immediately after editing looses last edit ***
+-  *** CellRendererCombo ( bug reported - waiting on reply )
+-  *** MOFO::CellRendererText ( don't know how to do this - revert to standard? )
+
+- Add record paging similar to Gtk2::Ex::DBI for huge results
+    - How do we do this?
+
+- Support detecting primary keys for more DB servers
+
 - Support custom functions for colour formatting cells?
     - Too processor-intensive?
     - Trigger from process_xxx_editing subs?

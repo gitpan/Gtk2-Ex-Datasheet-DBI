@@ -28,11 +28,11 @@ use constant {
 
 # Record Status column
 use constant{
-			STATUS_COLUMN		=> 0
+						STATUS_COLUMN		=> 0
 };
 
 BEGIN {
-			$Gtk2::Ex::DBI::Datasheet::VERSION = '0.9';
+			$Gtk2::Ex::DBI::Datasheet::VERSION = '2.0';
 }
 
 sub new {
@@ -42,19 +42,57 @@ sub new {
 	# Assemble object from request
 	my $self = {
 			dbh				=> $$req{dbh},			# A database handle
-			table			=> $$req{table},		# The source table
 			primary_key		=> $$req{primary_key},	# The primary key ( needed for inserts / updates )
-			sql_select		=> $$req{sql_select},	# The fields in the 'select' clause of the query
-			sql_where		=> $$req{sql_where},	# The 'where' clause of the query
-			sql_order_by	=> $$req{sql_order_by},	# The 'order by' clause of the query
+			schema			=> $$req{schema},		# Database schema ( not required for MySQL )
+			sql				=> $$req{sql},			# A hash of SQL related stuff
 			treeview		=> $$req{treeview},		# The Gtk2::Treeview to connect to
 			fields			=> $$req{fields},		# Field definitions
 			multi_select	=> $$req{multi_select},	# Boolean to enable multi selection mode
 			read_only		=> $$req{read_only},	# Boolean to indicate read-only mode
-			on_apply		=> $$req{on_apply}		# Code that runs *after* each *record* is applied
+			on_apply		=> $$req{on_apply},		# Code that runs *after* each *record* is applied
+			dump_on_error	=> $$req{dump_on_error}	# Boolean to dump SQL command on DBI error
 	};
 	
 	bless $self, $class;
+	
+	my $legacy_warnings;
+	
+	# Reconstruct sql object if needed
+	if ( $$req{sql_select} || $$req{table} || $$req{sql_where} || $$req{sql_order_by} ) {
+		
+		# Strip out SQL directives
+		if ( $$req{sql_select} ) {
+			$$req{sql_select}	=~ s/^select //i;
+		}
+		if ( $$req{table} ) {
+			$$req{table}	=~ s/^from //i;
+		}
+		if ( $$req{sql_where} ) {
+			$$req{sql_where}	=~ s/^where //i;
+		}
+		if ( $$req{sql_order_by} ) {
+			$$req{sql_order_by}	=~ s/^order by //i;
+		}
+		
+		# Assemble things
+		my $sql = {
+					select		=> $$req{sql_select},
+					from		=> $$req{table},
+					where		=> $$req{sql_where},
+					order_by	=> $$req{sql_order_by}
+		};
+		
+		$self->{sql} = $sql;
+		
+		$legacy_warnings = " - use the new sql object for the SQL string\n";
+		
+	}
+	
+	if ( $legacy_warnings || $self->{legacy_mode} ) {
+		print "\n\n **** Gtk2::Ex::Datasheet::DBI starting in legacy mode ***\n";
+		print "While quite some effort has gone into supporting this, it would be wise to take action now.\n";
+		print "Warnings triggered by your request:\n$legacy_warnings\n";
+	}
 	
 	$self->setup_treeview;
 	
@@ -71,32 +109,67 @@ sub new {
 		$parent_widget = $toplevel_widget->get_parent;
 	}
 	
-	$toplevel_widget->signal_connect( delete_event => sub {
-		if ( $self->any_changes ) {
-			my $answer = Gtk2::Ex::Dialogs::Question->new_and_run(
-				title	=> "Apply changes to " . $self->{table} . " before closing?",
-				text	=> "There are changes to the current datasheet ( " . $self->{table} . " )\n"
-					. "that haven't yet been applied. Would you like to apply them before closing the form?"
-																 );
-			# We return FALSE to allow the default signal handler to
-			# continue with destroying the window - all we wanted to do was check
-			# whether to apply records or not
-			if ( $answer ) {
-				if ( $self->apply ) {
-					return FALSE;
+	push @{$self->{objects_and_signals}},
+	[
+		$toplevel_widget,
+		$toplevel_widget->signal_connect( delete_event => sub {
+			if ( ! $self->{read_only} && $self->any_changes ) {
+				my $answer = Gtk2::Ex::Dialogs::Question->new_and_run(
+					title	=> "Apply changes to " . $self->{from} . " before closing?",
+					text	=> "There are changes to the current datasheet ( " . $self->{from} . " )\n"
+						. "that haven't yet been applied. Would you like to apply them before closing the form?"
+				);
+				# We return FALSE to allow the default signal handler to
+				# continue with destroying the window - all we wanted to do was check
+				# whether to apply records or not
+				if ( $answer ) {
+					if ( $self->apply ) {
+						return FALSE;
+					} else {
+						# ie don't allow the form to close if there was an error applying
+						return TRUE;
+					}
 				} else {
-					# ie don't allow the form to close if there was an error applying
-					return TRUE;
+					return FALSE;
 				}
-			} else {
-				return FALSE;
 			}
-		}
-	} );
+		} )
+	];
 	
 	$self->query;
 	
 	return $self;
+	
+}
+
+sub destroy_signal_handlers {
+	
+	my $self = shift;
+	
+	foreach my $set ( @{$self->{objects_and_signals}} ) {
+		$$set[0]->signal_handler_disconnect( $$set[1] );
+	}
+	
+	if ( $self->{changed_signal} ) {
+		$self->{treeview}->get_model->signal_handler_disconnect( $self->{changed_signal} );
+	}
+	
+	return TRUE;
+	
+}
+
+sub destroy_self {
+	
+	undef $_[0];
+	
+}
+
+sub destroy {
+	
+	my $self = shift;
+	
+	$self->destroy_signal_handlers;
+	$self->destroy_self;
 	
 }
 
@@ -110,8 +183,10 @@ sub setup_treeview {
 	# Cache the fieldlist array so we don't have to continually query the DB server for it
 	my $sth;
 	
+	my $sql = "select " . $self->{sql}->{select} . " from " . $self->{sql}->{from} . " where 0=1";
+	
 	eval {
-		$sth = $self->{dbh}->prepare( $self->{sql_select} . " from " . $self->{table} . " where 0=1" )
+		$sth = $self->{dbh}->prepare( $sql )
 			|| die $self->{dbh}->errstr;
 	};
 	
@@ -120,6 +195,9 @@ sub setup_treeview {
 								title		=> "Error in Query!",
 								text		=> "Database server says:\n$@"
 							);
+		if ( $self->{dump_on_error} ) {
+			print "SQL was:\n\n$sql\n\n";
+		}
 		return FALSE;
 	}
 	
@@ -132,28 +210,64 @@ sub setup_treeview {
 								title		=> "Error in Query!",
 								text		=> "Database server says:\n$@"
 							);
+		if ( $self->{dump_on_error} ) {
+			print "SQL was:\n\n$sql\n\n";
+		}
 		return FALSE;
 	}
 	
 	$self->{fieldlist} = $sth->{'NAME'};
 	
 	$sth->finish;
-	
+		
 	# Fetch column_info for current table
-	$sth = $self->{dbh}->column_info ( undef, $self->{schema}, $self->{table}, '%' );
+	eval {
+		$sth = $self->{dbh}->column_info ( undef, $self->{schema}, $self->{sql}->{from}, '%' )
+			|| die $self->{dbh}->errstr;
+	};
 	
-	# Loop through the list of columns from the database, and
-	# add only columns that we're actually dealing with
-	while ( my $column_info_row = $sth->fetchrow_hashref ) {
-		for my $field ( @{$self->{fieldlist}} ) {
-			if ( $column_info_row->{COLUMN_NAME} eq $field ) {
-				$self->{column_info}->{$field} = $column_info_row;
-				last;
+	if ($@) {
+		
+		# We don't really want a dialog error message in this case. Dump a warning to the console
+		# that we can't get column info, and continue ( renderers will default to text )
+		warn "\nCould\'t get column info from database ...\n"
+			. " ... This will happen in a multi-table query ...\n"
+			. " ... Defaulting to text renderers for undefined fields\n\n";
+		
+		if ( ! $self->{primary_key} ) {
+			warn "\nMISSING primary_key definition!\n"
+				. "If column_info fails ( eg multi-table queries ), then you MUST\n"
+				. "provide a primary_key in the constructor!\n\n";
+			return FALSE;
+		}
+		
+	} else {
+		
+		while ( my $column_info_row = $sth->fetchrow_hashref ) {
+			# Set the primary key if we find one ( MySQL only at present )
+			# but only if one hasn't been defined yet ( could be a multi-table query )
+			if (
+				! $self->{primary_key} && (
+				$column_info_row->{mysql_is_pri_key} ||		# mysql
+				$column_info_row->{TYPE_NAME} =~/ identity/	# SQL Server and maybe others
+										  )
+			   )
+			{
+				$self->{primary_key} = $column_info_row->{COLUMN_NAME};
+			}
+			# Loop through the list of columns from the database, and
+			# add only columns that we're actually dealing with
+			for my $field ( @{$self->{fieldlist}} ) {
+				if ( $column_info_row->{COLUMN_NAME} eq $field ) {
+					$self->{column_info}->{$field} = $column_info_row;
+					last;
+				}
 			}
 		}
+		
+		$sth->finish;
+		
 	}
-	
-	$sth->finish;
 	
 	# If there are no field definitions, then create some from our fieldlist from the database
 	if ( ! $self->{fields} ) {
@@ -226,11 +340,6 @@ sub setup_treeview {
 				$renderer = MOFO::CellRendererText->new;
 			}
 			
-			# Mark the renderer for time columns so we can do validation on them later
-			if ( $field->{renderer} eq "time" ) {
-				$renderer->{time} = TRUE;
-			}
-			
 			$renderer->{column} = $column_no;
 			
 			if ( ! $self->{read_only} ) {
@@ -247,7 +356,11 @@ sub setup_treeview {
 				$self->{columns}[$column_no]->set_visible( FALSE );
 			}
 			
-			$renderer->signal_connect( edited => sub { $self->process_text_editing( @_ ); } );
+			push @{$self->{objects_and_signals}},
+			[
+				$renderer,
+				$renderer->signal_connect( edited => sub { $self->process_text_editing( @_ ); } )
+			];
 			
 			$self->{treeview}->append_column($self->{columns}[$column_no]);
 			
@@ -276,7 +389,9 @@ sub setup_treeview {
 		#											$renderer,
 		#											'value'	=> $column_no
 		#										);
-		#	
+		#
+		#   * * * TODO * * * add to $self->{objects_and_signals} if re-activated * * * TODO * * *
+		#
 		#	$renderer->signal_connect( edited => sub { $self->process_text_editing( @_ ); } );
 		#	
 		#	$self->{treeview}->append_column($self->{columns}[$column_no]);
@@ -321,7 +436,11 @@ sub setup_treeview {
 													text	=> $column_no
 												);
 			
-			$renderer->signal_connect( edited => sub { $self->process_text_editing( @_ ); } );
+			push @{$self->{objects_and_signals}},
+			[
+				$renderer,
+				$renderer->signal_connect( edited => sub { $self->process_text_editing( @_ ); } )
+			];
 			
 			$self->{treeview}->append_column($self->{columns}[$column_no]);
 			
@@ -375,7 +494,11 @@ sub setup_treeview {
 													model	=> $renderer->{dynamic_model_position}
 												);
 			
-			$renderer->signal_connect( edited => sub { $self->process_text_editing( @_ ); } );
+			push @{$self->{objects_and_signals}},
+			[
+				$renderer,
+				$renderer->signal_connect( edited => sub { $self->process_text_editing( @_ ); } )
+			];
 			
 			$self->{treeview}->append_column($self->{columns}[$column_no]);
 			
@@ -404,7 +527,11 @@ sub setup_treeview {
 													active	=> $column_no
 												);
 			
-			$renderer->signal_connect( toggled => sub { $self->process_toggle( @_ ); } );
+			push @{$self->{objects_and_signals}},
+			[
+				$renderer,
+				$renderer->signal_connect( toggled => sub { $self->process_toggle( @_ ); } )
+			];
 			
 			$self->{treeview}->append_column($self->{columns}[$column_no]);
 			
@@ -426,7 +553,11 @@ sub setup_treeview {
 													'date'	=> $column_no
 												);
 			
-			$renderer->signal_connect( edited => sub { $self->process_text_editing( @_ ); } );
+			push @{$self->{objects_and_signals}},
+			[
+				$renderer,
+				$renderer->signal_connect( edited => sub { $self->process_text_editing( @_ ); } )
+			];
 			
 			$self->{treeview}->append_column($self->{columns}[$column_no]);
 			
@@ -448,7 +579,11 @@ sub setup_treeview {
 													'time'	=> $column_no
 												);
 			
-			$renderer->signal_connect( edited => sub { $self->process_text_editing( @_ ); } );
+			push @{$self->{objects_and_renderers}},
+			[
+				$renderer,
+				$renderer->signal_connect( edited => sub { $self->process_text_editing( @_ ); } )
+			];
 			
 			$self->{treeview}->append_column($self->{columns}[$column_no]);
 			
@@ -512,6 +647,12 @@ sub setup_treeview {
 	$self->{icons}[DELETED]		= $self->{treeview}->render_icon( "gtk-delete",		"menu" );
 	
 	$self->{resize_signal} = $self->{treeview}->signal_connect( size_allocate => sub { $self->size_allocate( @_ ); } );
+	
+	push @{$self->{objects_and_signals}},
+	[
+		$self->{treeview},
+		$self->{resize_signal}
+	];
 	
 	# Turn on multi-select mode if requested
 	if ($self->{multi_select}) {
@@ -729,7 +870,7 @@ sub process_toggle {
 
 sub query {
 	
-	my ( $self, $sql_where, $dont_apply ) = @_;
+	my ( $self, $where_object, $dont_apply ) = @_;
 	
 	my $model = $self->{treeview}->get_model;
 	
@@ -747,14 +888,14 @@ sub query {
 			if ( $status != UNCHANGED ) {
 				
 				my $answer = ask Gtk2::Ex::Dialogs::Question(
-						    title	=> "Apply changes to " . $self->{table} . " before querying?",
-						    text	=> "There are outstanding changes to the current datasheet ( " . $self->{table} . " )."
+						    title	=> "Apply changes to " . $self->{sql}->{from} . " before querying?",
+						    text	=> "There are outstanding changes to the current datasheet ( " . $self->{sql}->{from} . " )."
 									. " Do you want to apply them before running a new query?"
 									    );
 				
-				if ($answer) {
+				if ( $answer ) {
 				    if ( ! $self->apply ) {
-					return FALSE; # Apply method will already give a dialog explaining error
+						return FALSE; # Apply method will already give a dialog explaining error
 				    }
 				}
 				
@@ -766,46 +907,82 @@ sub query {
 		
 	}
 	
-	if ( $sql_where ) {
-		$self->{sql_where} = $sql_where;
+	# Deal with legacy mode - the query method used to accept an optional where clause
+	if ( $where_object ) {
+		
+		if ( ref( $where_object ) ne "HASH" ) {
+			
+			# Legacy mode
+			# Strip 'where ' out of clause
+			$where_object =~ s/^where //i;
+			
+			# Transfer new where clause if defined
+			$self->{sql}->{where} = $where_object;
+			
+			# Also remove any bound values if called in legacy mode
+			$self->{sql}->{bind_values} = undef;
+			
+		} else {
+			
+			# NOT legacy mode
+			if ( $where_object->{where} ) {
+				$self->{sql}->{where} = $where_object->{where};
+			}
+			if ( $where_object->{bind_values} ) {
+				$self->{sql}->{bind_values} = $where_object->{bind_values};
+			}
+			
+		}
+		
+	}
+	
+	my $sql = "select " . $self->{sql}->{select} . ", " . $self->{primary_key} . " from " . $self->{sql}->{from};
+	
+	if ( $self->{sql}->{where} ) {
+		$sql .= " where " . $self->{sql}->{where};
+	}
+	
+	if ( $self->{sql}->{order_by} ) {
+		$sql .= " order by " . $self->{sql}->{order_by};
 	}
 	
 	my $sth;
-	my $sql = $self->{sql_select} . ", " . $self->{primary_key} . " from " . $self->{table};
-	
-	if ( $self->{sql_where} ) {
-		$sql .= " " . $self->{sql_where};
-	}
-	
-	if ( $self->{sql_order_by} ) {
-		$sql .= " " . $self->{sql_order_by};
-	}
 	
 	eval {
-		$sth = $self->{dbh}->prepare($sql) || die;
+		$sth = $self->{dbh}->prepare( $sql ) || die;
 	};
 	
 	if ($@) {
-			new_and_run Gtk2::Ex::Dialogs::ErrorMsg(
-								title   => "Error preparing select statement!",
-								text    => "Database Server says:\n" . $self->{dbh}->errstr
-							       );
-			return 0;
+		new_and_run Gtk2::Ex::Dialogs::ErrorMsg(
+			title   => "Error preparing select statement!",
+			text    => "Database Server says:\n" . $self->{dbh}->errstr
+		);
+		if ( $self->{dump_on_error} ) {
+			print "SQL was:\n\n$sql\n\n";
+		}
+		return FALSE;
 	}
 	
 	# Create a new ListStore
 	my $liststore = Gtk2::ListStore->new(@{$self->{ts_def}});
 	
 	eval {
-		$sth->execute || die;
+		if ( $self->{sql}->{bind_values} ) {
+			$sth->execute( @{$self->{sql}->{bind_values}} ) || die $self->{dbh}->errstr;
+		} else {
+			$sth->execute || die $self->{dbh}->errstr;
+		}
 	};
 	
 	if ($@) {
-			new_and_run Gtk2::Ex::Dialogs::ErrorMsg(
-								title   => "Error executing statement!",
-								text    => "Database Server says:\n" . $self->{dbh}->errstr
-							       );
-			return 0;
+		new_and_run Gtk2::Ex::Dialogs::ErrorMsg(
+			title   => "Error executing statement!",
+			text    => "Database Server says:\n" . $self->{dbh}->errstr
+		);
+		if ( $self->{dump_on_error} ) {
+			print "SQL was:\n\n$sql\n\n";
+		}
+		return FALSE;
 	}
 	
 	while (my @row = $sth->fetchrow_array) {
@@ -819,44 +996,59 @@ sub query {
 		
 		for my $field (@{$self->{fields}}) {
 			
-			push @model_row, $column + 1, $row[$column];
+			push @model_row,
+				$column + 1,
+				$row[$column];
 			
-			# If this is a dynamic combo, construct it's model now and queue it to be appended
-			# at the end of the 'normal' columns
-			
-			# *** TODO *** Do we need to actually queue this stuff, or can we specify them
-			# out-of-order, as long as we use the right values for the column number?
-			
+			# If this is a dynamic combo, append it to the end of the 'normal' columns
+			# Luckily we have already figured out it's position ...
 			if ( $field->{renderer} && $field->{renderer} eq "dynamic_combo" ) {
-				push @dynamic_models,
+				push @model_row,
 					$field->{dynamic_model_position},
 					$self->create_dynamic_model( $field->{model_setup}, \@row );
 			}
-			
+						
 			$column++;
 		}
 		
 		# Append queued models for dynamic combos
-		for my $dynamic_model ( @dynamic_models ) {
-			push @model_row, $dynamic_model;
-		}
+		#for my $dynamic_model ( @dynamic_models ) {
+		#	push @model_row, $dynamic_model;
+		#}
 		
 		# Append the primary key to the end
 		push @model_row,
 			$column + 1 + ( $self->{dynamic_models} || 0 ),
 			$row[$column];
 		
-		$liststore->set(@model_row);
+		$liststore->set( @model_row );
 		
+	}
+	
+	# Destroy changed_signal attached to old model
+	if ( $self->{changed_signal} ) {
+		$self->{treeview}->get_model->signal_handler_disconnect( $self->{changed_signal} );
 	}
 	
 	$self->{changed_signal} = $liststore->signal_connect( "row-changed" => sub { $self->changed(@_) } );
 	
-	$self->{treeview}->set_model($liststore);
+	$self->{treeview}->set_model( $liststore );
 	
 }
 
 sub undo {
+	
+	# undo and revert are synonyms of each other
+	
+	my $self = shift;
+	
+	$self->query( undef, TRUE );
+	
+}
+
+sub revert {
+	
+	# undo and revert are synonyms of each other
 	
 	my $self = shift;
 	
@@ -871,10 +1063,10 @@ sub changed {
 	my $model = $self->{treeview}->get_model;
 	
 	# Only change the record status if it's currently unchanged
-	if ( ! $model->get($iter, STATUS_COLUMN) ) {
-		$model->signal_handler_block($self->{changed_signal});
-		$model->set($iter, STATUS_COLUMN, CHANGED);
-		$model->signal_handler_unblock($self->{changed_signal});
+	if ( ! $model->get( $iter, STATUS_COLUMN ) ) {
+		$model->signal_handler_block( $self->{changed_signal} );
+		$model->set( $iter, STATUS_COLUMN, CHANGED );
+		$model->signal_handler_unblock( $self->{changed_signal} );
 	}
 	
 }
@@ -888,7 +1080,7 @@ sub apply {
 					title   => "Read Only!",
 					text    => "Datasheet is open in read-only mode!"
 				       );
-		return 0;
+		return FALSE;
 	}
 	
 	my $model = $self->{treeview}->get_model;
@@ -896,34 +1088,38 @@ sub apply {
 	
 	while ($iter) {
 		
-		my $status = $model->get($iter, STATUS_COLUMN);
+		my $status = $model->get( $iter, STATUS_COLUMN );
 		
 		# Decide what to do based on status
 		if ( $status == UNCHANGED ) {
 			
-			$iter = $model->iter_next($iter);
+			$iter = $model->iter_next( $iter );
 			next;
 			
 		} elsif ( $status == DELETED ) {
 			
-			my $primary_key = $model->get($iter, $self->{primary_key_column});
+			my $primary_key = $model->get( $iter, $self->{primary_key_column} );
 			
-			my $sth = $self->{dbh}->prepare("delete from " . $self->{table}
-				. " where " . $self->{primary_key} . "=?");
+			my $sql = "delete from " . $self->{sql}->{from} . " where " . $self->{primary_key} . "=?";
+			
+			my $sth = $self->{dbh}->prepare( $sql );
 			
 			eval {
-				$sth->execute($primary_key) || die;
+				$sth->execute( $primary_key ) || die;
 			};
 			
 			if ($@) {
-					new_and_run Gtk2::Ex::Dialogs::ErrorMsg(
-										title   => "Error deleting record!",
-										text    => "Database Server says:\n" . $self->{dbh}->errstr
-									       );
-					return 0;
+				new_and_run Gtk2::Ex::Dialogs::ErrorMsg(
+					title   => "Error deleting record!",
+					text    => "Database Server says:\n" . $self->{dbh}->errstr
+				);
+				if ( $self->{dump_on_error} ) {
+					print "SQL was:\n\n$sql\n\n";
+				}
+				return FALSE;
 			};
 			
-			$model->remove($iter);
+			$model->remove( $iter );
 			
 		} else {
 			
@@ -952,9 +1148,9 @@ sub apply {
 			
 			if ( $status == INSERTED ) {
 				chop($placeholders);
-				$sql = "insert into " . $self->{table} . " ( $sql_fields ) values ( $placeholders )";
+				$sql = "insert into " . $self->{sql}->{from} . " ( $sql_fields ) values ( $placeholders )";
 			} else {
-				$sql = "update " . $self->{table} . " set $sql_fields"
+				$sql = "update " . $self->{sql}->{from} . " set $sql_fields"
 					. " where " . $self->{primary_key} . "=?";
 				$primary_key = $model->get( $iter, $self->{primary_key_column} );
 				push @values, $primary_key;
@@ -963,15 +1159,18 @@ sub apply {
 			my $sth;
 			
 			eval {
-				$sth = $self->{dbh}->prepare($sql) || die;
+				$sth = $self->{dbh}->prepare( $sql ) || die;
 			};
 			
 			if ($@) {
-					new_and_run Gtk2::Ex::Dialogs::ErrorMsg(
-										title   => "Error preparing statement!",
-										text    => "Database Server says:\n" . $self->{dbh}->errstr
-									       );
-					return 0;
+				new_and_run Gtk2::Ex::Dialogs::ErrorMsg(
+					title   => "Error preparing statement!",
+					text    => "Database Server says:\n" . $self->{dbh}->errstr
+				);
+				if ( $self->{dump_on_error} ) {
+					print "SQL was:\n\n$sql\n\n";
+				}
+				return FALSE;
 			}
 			
 			eval {
@@ -979,12 +1178,14 @@ sub apply {
 			};
 			
 			if ($@) {
-					new_and_run Gtk2::Ex::Dialogs::ErrorMsg(
-										title   => "Error processing recordset!",
-										text    => "Database Server says:\n" . $self->{dbh}->errstr
-									       );
-					warn "Error updating recordset:\n$sql\n" . $@ . "\n\n";
-					return 0;
+				new_and_run Gtk2::Ex::Dialogs::ErrorMsg(
+					title   => "Error processing recordset!",
+					text    => "Database Server says:\n" . $self->{dbh}->errstr
+				);
+				if ( $self->{dump_on_error} ) {
+					print "SQL was:\n\n$sql\n\n";
+				}
+				return FALSE;
 			}
 			
 			# If we just inserted a record, we have to fetch the primary key and replace the current '!' with it
@@ -995,9 +1196,9 @@ sub apply {
 			
 			# If we've gotten this far, the update was OK, so we'll reset the 'changed' flag
 			# and move onto the next record
-			$model->signal_handler_block($self->{changed_signal});
-			$model->set($iter, STATUS_COLUMN, UNCHANGED);
-			$model->signal_handler_unblock($self->{changed_signal});
+			$model->signal_handler_block( $self->{changed_signal} );
+			$model->set( $iter, STATUS_COLUMN, UNCHANGED );
+			$model->signal_handler_unblock( $self->{changed_signal} );
 			
 			# Execute user-defined functions
 			if ( $self->{on_apply} ) {
@@ -1026,7 +1227,7 @@ sub apply {
 			
 		}
 		
-		$iter = $model->iter_next($iter);
+		$iter = $model->iter_next( $iter );
 		
 	}
 	
@@ -1045,7 +1246,7 @@ sub insert {
 				       );
 		return 0;
 	}
-		
+	
 	my $model = $self->{treeview}->get_model;
 	my $iter = $model->append;
 	
@@ -1134,7 +1335,7 @@ sub size_allocate {
 		}
 		
 		# *** TODO *** Doesn't currently work ( completely )
-		$self->{treeview}->signal_handler_unblock($self->{resize_signal});
+		$self->{treeview}->signal_handler_unblock( $self->{resize_signal} );
 		
 	}
 	
@@ -1262,18 +1463,40 @@ sub create_dynamic_model {
 	my $dbh = $self->{dbh}->clone;
 	
 	my $liststore = Gtk2::ListStore->new(
-						"Glib::String",
-						"Glib::String"
-					    );
+		"Glib::String",
+		"Glib::String"
+	);
 	
-	my $sql = "select " . $model_setup->{id} . ", " . $model_setup->{display} . " from " . $model_setup->{table};
+	# Deal with legacy mode
+	my $legacy_warnings;
+	
+	if ( $model_setup->{table} ) {
+		$model_setup->{from} = $model_setup->{table};
+		$legacy_warnings .= " - \$model_setup->{table} renamed to \$model_setup->{from} for consistency\n";
+	}
+	
+	if ( $model_setup->{order_by} && $model_setup->{order_by} =~ m/^order by /i ) {
+		$model_setup->{order_by} =~ s/^order by //i;
+		$legacy_warnings .= " - ommit the words \'order by\' from \$model_setup->{order_by}\n";
+	}
+	
+	if ( $model_setup->{group_by} && $model_setup->{group_by} =~ m/^group by /i ) {
+		$model_setup->{group_by} =~ s/^group by //i;
+		$legacy_warnings .= " - ommit the words \'order by\' from \$model_setup->{group_by}\n";
+	}
+	
+	if ( $legacy_warnings ) {
+		print "Gtk2::Ex::Datasheet::DBI::create_dynamic_model raised the following warnings:\n$legacy_warnings\n";
+	}
+	
+	my $sql = "select " . $model_setup->{id} . ", " . $model_setup->{display} . " from " . $model_setup->{from};
 	my @bind_variables;
 	
 	if ( $model_setup->{criteria} ) {
 		$sql .= " where";
 		for my $criteria ( @{$model_setup->{criteria}} ) {
 			$sql .= " " . $criteria->{field} . "=? and";
-			push @bind_variables, $$data[$self->column_from_name($criteria->{column_name}) - 1];
+			push @bind_variables, $$data[$self->column_from_name( $criteria->{column_name} ) - 1];
 		}
 	}
 	
@@ -1284,36 +1507,37 @@ sub create_dynamic_model {
 	}
 	
 	if ( $model_setup->{order_by} ) {
-		$sql .= " " . $model_setup->{order_by};
+		$sql .= " order by " . $model_setup->{order_by};
 	}
 	
 	my $sth;
 	
 	eval {
-		$sth = $dbh->prepare($sql) || die $dbh->errstr;
+		$sth = $dbh->prepare( $sql ) || die $dbh->errstr;
 	};
 	
 	if ($@) {
 		new_and_run Gtk2::Ex::Dialogs::ErrorMsg(
 					title   => "Error creating combo model!",
 					text    => "DB server says:\n$@"
-				       );
+		);
+		if ( $self->{dump_on_error} ) {
+			print "SQL was:\n\n$sql\n\n";
+		}
 		return FALSE;
 	}
 	
-	$sth->execute(@bind_variables);
+	$sth->execute( @bind_variables );
 	
 	my $iter;
     
 	while (my @record = $sth->fetchrow_array) {
-		
-	        $iter = $liststore->append;
+	    $iter = $liststore->append;
 		$liststore->set(
 					$iter,
 					0, $record[0],
 					1, $record[1]
 			       );
-	        
 	}
 	
 	$sth->finish;
@@ -2354,18 +2578,19 @@ sub RENDER {
 #######################################################################################
 
 
-
 =head1 NAME
 
 Gtk2::Ex::Datasheet::DBI
 
 =head1 SYNOPSIS
 
-use DBI;
-use Gtk2 -init;
-use Gtk2::Ex::Datasheet::DBI; 
+   use DBI;
 
-my $dbh = DBI->connect (
+   use Gtk2 -init;
+
+   use Gtk2::Ex::Datasheet::DBI; 
+
+   my $dbh = DBI->connect (
                         "dbi:mysql:dbname=sales;host=screamer;port=3306",
                         "some_username",
                         "salespass", {
@@ -2373,14 +2598,17 @@ my $dbh = DBI->connect (
                                        RaiseError => 0,
                                        AutoCommit => 1,
                                      }
-);
+   );
 
-my $datasheet_def = {
+   my $datasheet_def = {
                       dbh          => $dbh,
                       table        => "BirdsOfAFeather",
                       primary_key  => "ID",
-                      sql_select   => "select FirstName, LastName, GroupNo, Active",
-                      sql_order_by => "order by LastName",
+                      sql          => {
+                                           select        => "FirstName, LastName, GroupNo, Active",
+                                           from          => "BirdsOfAFeather",
+                                           order_by      => "LastName"
+                                      },
                       treeview     => $testwindow->get_widget("BirdsOfAFeather_TreeView"),
                       fields       => [
                                          {
@@ -2405,10 +2633,10 @@ my $datasheet_def = {
                                          }
                                       ],
                       multi_select => TRUE
-};
+   };
 
-$birds_of_a_feather_datasheet = Gtk2::Ex::Datasheet::DBI->new($datasheet_def)
-   || die ("Error setting up Gtk2::Ex::Datasheet::DBI\n");
+   $birds_of_a_feather_datasheet = Gtk2::Ex::Datasheet::DBI->new($datasheet_def)
+      || die ("Error setting up Gtk2::Ex::Datasheet::DBI\n");
 
 =head1 DESCRIPTION
 
@@ -2430,20 +2658,31 @@ such as inserting, deleting, etc.
 
 =head2 new
 
+=over 4
+
 Object constructor. Expects a hash of key / value pairs. Bare minimum are:
   
   dbh             - a DBI database handle
-  table           - the name of the table you are querying
-  primary_key     - the primary key of the table you are querying ( required for updating / deleting )
-  sql_select      - the 'select' clause of the query
-  
+  sql             - a hash describing the SQL to execute ( see below )
+
 Other keys accepted are:
   
-  sql_where       - the 'where' clause of the query
-  sql_order_by    - the 'order by' clause of the query
+  primary_key     - the primary key of the table you are querying
   multi_selcet    - a boolean to turn on the TreeView's 'multiple' selection mode
-  fields          - an array of hashes to describe the fields ( columns ) in the TreeView
+  fields          - an array of hashes to describe the fields ( columns ) in the TreeView ( see below )
+  read_only       - a boolean to lock datasheet to read-only ( record status indicator will also disappear )
+  on_apply        - a reference to some code to run when a recordset is applied ( see below )
+  dump_on_error   - a boolean to turn on dumping of SQL string to the STDOUT on a DBI error
   
+The SQL object contains the following keys:
+
+  select          - the select clause
+  from            - the from clause
+  where           - the where clause ( may contain values or placeholders )
+  bind_values     - an array of values to bind to placeholders
+
+Note that each clause has it's directive ( ie 'select', 'from', where', 'order by' *ommitted* )
+
 Each item in the 'fields' key is a hash, with the following possible keys:
   
   name            - the name to display in the column's heading
@@ -2451,12 +2690,11 @@ Each item in the 'fields' key is a hash, with the following possible keys:
   x_absolute      - an absolute value to use for the width of this column
   renderer        - string name of renderer - possible values are currently:
                     - text           - default if no renderer defined
-                    - number         - invokes a customer CellRendererSpin button ( diabled and reverts to text )
+                    - number         - invokes a customer CellRendererSpin button ( disabled and reverts to text )
                     - combo          - static combo box with a pre-defined list of options
                     - dynamic_combo  - combo box that depends on values in the current row
                     - toggle         - good for boolean values
                     - date           - good for dates - MUST be in YYYY-MM-DD format ( ie most databases should be OK )
-                    - time           - supurb for times - MUST be in 24-hour format
                     - hidden         - use this for hidden columns
   model           - a TreeModel to use with a combo renderer
   model_setup     - object describing the setup of a dynamic_combo ( see below )
@@ -2464,6 +2702,11 @@ Each item in the 'fields' key is a hash, with the following possible keys:
 
 As of version 0.8, the database schema is queried and a suitable renderer is automatically selected
 if one is not specified. You will of course still have to set up combos yourself.
+
+As of version 2.0, the primary key is automatically selected for you if you use MySQL. Note, however,
+that this will only work if the FROM clause contains a single table. If you have a multi-table query,
+you must specify the primary_key, otherwise the last primary_key encountered will use. I recommend
+against using multi-table queries anyway.
 
 In the case of a 'number' renderer, the following keys are also used:
 
@@ -2483,7 +2726,7 @@ For dynamic_combo renderers, the 'model_setup' object should take the following 
 
   id              => "ID"
   display         => "Description",
-  table           => "SomeTable",
+  from            => "SomeTable",
   criteria        => [
                         {
                              field          => "first_where_clause_field",
@@ -2517,14 +2760,25 @@ The 'criteria' key is an array of hashes for you to define criteria. Inside each
 The 'group_by' key is a 'group by' clause. You *shouldn't* need one, but I've added support anyway...
 
 The 'order_by' key is an 'order by' clause
-  
-=head2 query ( [ $new_where_clause ], [ $dont_apply ] )
+
+=back
+
+=head2 query ( [ where_object ], [ dont_apply ] )
+
+=over 4
 
 Requeries the DB server. If there are any outstanding changes that haven't been applied to the database,
 a dialog will be presented to the user asking if they want to apply updates before requerying.
 
-If a new where clause is passed, it will replace the existing one.
+If a where object is passed, it will replace the existing one.
 If dont_apply is set, *no* dialog will appear if there are outstanding changes to the data.
+
+The where_object is a hash:
+
+   {
+         where         => a where clause - can include placeholders
+         bind_values   => an array of values to bind to placeholders ( optional )
+   }
 
 The query method doubles as an 'undo' method if you set the dont_apply flag, eg:
 
@@ -2532,12 +2786,20 @@ $datasheet->query ( undef, TRUE );
 
 This will requery and reset all the status indicators. See also undo method, below
 
+=back
+
 =head2 undo
+
+=over 4
 
 Basically a convenience function that calls $self->query( undef, TRUE ) ... see above.
 I've come to realise that having an undo method makes understanding your code a lot easier later.
 
+=back
+
 =head2 apply
+
+=over 4
 
 Applies all changes ( inserts, deletes, alterations ) in the datasheet to the database.
 As changes are applied, the record status indicator will be changed back to the original 'synchronised' icon.
@@ -2546,7 +2808,11 @@ If any errors are encountered, a dialog will be presented with details of the er
 will return FALSE without continuing through the records. The user will be able to tell where the apply failed
 by looking at the record status indicators ( and considering the error message they were presented ).
 
+=back
+
 =head2 insert ( [ @columns_and_values ] )
+
+=over 4
 
 Inserts a new row in the *model*. The record status indicator will display an 'insert' icon until the record
 is applied to the database ( apply method ).
@@ -2562,23 +2828,39 @@ Note that you can use the column_from_name method for fetching column numbers fr
 As of version 0.8, default values from the database schema are automatically inserted into all columns that
 aren't explicitely set as above.
 
+=back
+
 =head2 delete
+
+=over 4
 
 Marks all selected records for deletion, and sets the record status indicator to a 'delete' icon.
 The records will remain in the database until the apply method is called.
 
+=back
+
 =head2 column_from_name ( $sql_fieldname )
+
+=over 4
 
 Returns a field's column number in the model. Note that you *must* use the SQL fieldname,
 and not the column heading's name in the treeview.
 
+=back
+
 =head2 column_value ( $sql_fieldname )
+
+=over 4
 
 Returns the value of the requested column in the currently selected row.
 If multi_select is on and more than 1 row is selected, only the 1st value is returned.
 You *must* use the SQL fieldname, and not the column heading's name in the treeview.
 
+=back
+
 =head2 replace_combo_model ( $column_no, $new_model )
+
+=over 4
 
 Replaces the model for a combo renderer with a new one.
 You should only use this to replace models for a normal 'combo' renderer.
@@ -2587,9 +2869,30 @@ on your *main* form ( ie not in the datasheet ), and that value changes.
 If you instead want to base your list of options on a value *inside* the datasheet, use
 the 'dynamic_combo' renderer instead ( and don't use replace_combo_model on it ).
 
-=head1 General Ranting
+=back
+
+=head1 USER-DEFINED CALL-BACKS
+
+=head2 on_apply
+
+=over 4
+
+You can specify some code to run *after* changes to a recordset is applied ( see new() method ).
+It will be called for *every* record that has been changed. The user-defined code will be
+passed a reference to a hash:
+
+ {
+    status          => a string, with possible values: 'inserted', 'changed', or 'deleted'
+    primary_key     => the primary key of the record in question
+ }
+
+=back
+
+=head1 GENERAL RANTING
 
 =head2 Automatic Column Widths
+
+=over 4
 
 You can use x_percent and x_absolute values to set up automatic column widths. Absolute values are set
 once - at the start. In this process, all absolute values ( including the record status column ) are
@@ -2609,7 +2912,11 @@ size of each column, the scrollbar will no longer be needed and will disappear. 
 doesn't produce *too* much flicker on my system, but resize operations are noticably slower. What can I say?
 Patches appreciated :)
 
+=back
+
 =head2 Use of Database Schema
+
+=over 4
 
 Version 0.8 introduces querying the database schema to inspect column attributes. This considerably streamlines
 the process of setting up the datasheet and inserting records.
@@ -2622,19 +2929,73 @@ a model.
 When inserting a new record, default values from the database field definitions are also used ( unless you
 specify another value via the insert() method ).
 
+=back
+
 =head2 CellRendererCombo
+
+=over 4
 
 If you have Gtk-2.6 or greater, you can use the new CellRendererCombo. Set the renderer to 'combo' and attach
 your model to the field definition. You currently *must* have a model with ( numeric ) ID / String pairs, which is the
 usual for database applications, so you shouldn't have any problems. See the example application for ... an example.
 
-=head1 Authors
+=back
+
+=head1 AUTHORS
 
 Daniel Kasak - dan@entropy.homelinux.org
 
-=head1 Bugs
+=head1 CREDITS
+
+Muppet
+
+ - tirelessly offered help and suggestions in response to my endless list of questions
+
+Torsten Schoenfeld
+
+ - wrote custom CellRendererDate ( from the Gtk2-Perl examples )
+ - wrote custom CellRendererText ( with improved focus policy ) in Odot which I used here
+
+Gtk2-Perl Authors
+
+ - obviously without them, I wouldn't have gotten very far ...
+
+Gtk2-Perl list
+
+ - yet more help, suggestions, and general words of encouragement
+
+=head1 BUGS
 
 I think you must be mistaken
+
+=head1 ISSUES
+
+That's right. These are 'issues', not 'bugs' :)
+
+=head2 Accepting Changes to Cells
+
+=over 4
+
+=head3 Custom CellRendererText
+
+There is currently an issue with the custom CellRendererText that causes changes to be *dropped*
+if you don't exit the cell in the right way. The 'right' way includes hitting ENTER, or clicking with
+the mouse outside the cell, but *INSIDE* the current datasheet. The 'wrong' way includes going from
+typing in the cell to immediately clicking something *OUTSIDE* the datasheet. The cell will *not* register
+a change in this case. The moral of the story is to hit the ENTER key to accept changes before continuing.
+
+=back
+
+=head3 CellRendererCombo
+
+=over 4
+
+The CellRendererCombo widget has a problem almost identical to the above issue with the custom CellRendererText.
+I recommend either hitting the ENTER key or clicking outside the combo but inside the treeview to make
+sure changes are registered. I've submitted a bug report at http://bugzilla.gnome.org/show_bug.cgi?id=317387 as
+this issue is with a stock gtk feature.
+
+=back
 
 =head1 Other cool things you should know about:
 
@@ -2642,13 +3003,13 @@ This module is part of an umbrella project, 'Axis Not Evil', which aims to make
 Rapid Application Development of database apps using open-source tools a reality.
 The project includes:
 
-Gtk2::Ex::DBI                 - forms
-
-Gtk2::Ex::Datasheet::DBI      - datasheets
-
-PDF::ReportWriter             - reports
+  Gtk2::Ex::DBI                 - forms
+  Gtk2::Ex::Datasheet::DBI      - datasheets
+  PDF::ReportWriter             - reports
 
 All the above modules are available via cpan, or for more information, screenshots, etc, see:
 http://entropy.homelinux.org/axis_not_evil
 
 =head1 Crank ON!
+
+=cut

@@ -1,6 +1,29 @@
 CHANGELOG
 
-Version 0.9, released 20-Sep-2005
+Version 2.0, released 16-Jan-2006
+    
+    Overhaul SQL clause handling - now all SQL-related stuff is in the 'sql' hash
+    Added support for placeholders in where clause
+    Added detection of primary key from column_info() ( MySQL & SQL Server only at present )
+    Added destroy method, which destroys all signal handlers we've created, then destroys itself
+        ( not working yet )
+    Renamed $model_setup->{table} to $model_setup->{from} in dynamic models
+    Added legacy mode to support 1.x requests
+    Process dynamic models out of order when querying - no need to queue them for later
+    Added method revert(), which is a synonym of undo()
+    Added graceful handling of failure of $dbh->column_info ( warn to console what's happened )
+    Warn to console if $dbh->column_info fails AND we don't have a primary_key definition
+    Only ask to apply changes if not read_only
+    Addded missing schema request to self
+        - harmless anyway because we only support automatic renderer selection for MySQL currently
+    Updated documentation & cleaned up POD somewhat
+    
+Version 1.0, ( not released )
+    
+    Added dump_on_error flag to dump SQL on a DBI error
+    Converted more 0s to FALSEs
+    
+Version 0.9, released 16-Sep-2005
     
     Add some logic to MOFO::CellRendererDate so that popup calendar gets placed completely on-screen
     Added MOFO::CellRendererTime and use when a Time column is encountered
