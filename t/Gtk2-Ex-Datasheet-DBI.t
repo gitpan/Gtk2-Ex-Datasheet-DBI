@@ -15,11 +15,9 @@ my @methods = qw(
 			process_toggle
 			query
 			insert
-			size_allocate
 			apply
 			changed
 			delete
-			column_from_name
 			column_value
 			last_insert_id
 		);
